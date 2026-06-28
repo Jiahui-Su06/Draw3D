@@ -143,18 +143,47 @@ class Viewport(QWidget):
             return
 
         bounds = actor.GetBounds()
-        outline = pv.Box(
-            bounds=cast(tuple[float, float, float, float, float, float], bounds)
+        self._highlight_bounds(
+            cast(tuple[float, float, float, float, float, float], bounds),
+            f"{object_id}-selection",
         )
+        self.plotter.render()
+
+    def highlight_objects(self, object_ids: list[str]) -> None:
+        if self._selection_actor is not None:
+            self.plotter.remove_actor(self._selection_actor, reset_camera=False)
+            self._selection_actor = None
+
+        bounds_list: list[tuple[float, float, float, float, float, float]] = []
+        for object_id in object_ids:
+            actor = self._actors.get(object_id)
+            if actor is None:
+                continue
+            bounds_list.append(
+                cast(tuple[float, float, float, float, float, float], actor.GetBounds())
+            )
+
+        if not bounds_list:
+            self.plotter.render()
+            return
+
+        self._highlight_bounds(_merge_actor_bounds(bounds_list), "group-selection")
+        self.plotter.render()
+
+    def _highlight_bounds(
+        self,
+        bounds: tuple[float, float, float, float, float, float],
+        name: str,
+    ) -> None:
+        outline = pv.Box(bounds=bounds)
         self._selection_actor = self.plotter.add_mesh(
             outline,
             color="#F0B429",
             style="wireframe",
             line_width=2,
-            name=f"{object_id}-selection",
+            name=name,
             reset_camera=False,
         )
-        self.plotter.render()
 
     def reset_camera(self) -> None:
         self.plotter.reset_camera()
@@ -192,3 +221,19 @@ def _lit_rgb_from_hex(value: str, brightness: float) -> tuple[float, float, floa
     if not 0.0 <= brightness <= 2.0:
         raise ValueError("brightness must be between 0 and 2")
     return tuple(min(channel * brightness, 1.0) for channel in _rgb_from_hex(value))
+
+
+def _merge_actor_bounds(
+    bounds_list: list[tuple[float, float, float, float, float, float]],
+) -> tuple[float, float, float, float, float, float]:
+    if not bounds_list:
+        raise ValueError("cannot merge empty bounds")
+
+    return (
+        min(bounds[0] for bounds in bounds_list),
+        max(bounds[1] for bounds in bounds_list),
+        min(bounds[2] for bounds in bounds_list),
+        max(bounds[3] for bounds in bounds_list),
+        min(bounds[4] for bounds in bounds_list),
+        max(bounds[5] for bounds in bounds_list),
+    )

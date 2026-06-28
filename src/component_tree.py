@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QIcon
@@ -16,10 +18,23 @@ from objects import SceneObject
 
 OBJECT_ID_ROLE = Qt.ItemDataRole.UserRole
 VISIBLE_ROLE = Qt.ItemDataRole.UserRole + 1
+GROUP_KEY_ROLE = Qt.ItemDataRole.UserRole + 2
+GROUP_KIND_ROLE = Qt.ItemDataRole.UserRole + 3
+GROUP_NAME_ROLE = Qt.ItemDataRole.UserRole + 4
+GROUP_FILE_ROLE = Qt.ItemDataRole.UserRole + 5
 
 ICON_DIR = Path(__file__).resolve().parent / "icons"
 EYE_ICON = QIcon(str(ICON_DIR / "eye.svg"))
 EYE_OFF_ICON = QIcon(str(ICON_DIR / "eye_off.svg"))
+
+
+@dataclass(frozen=True)
+class ComponentGroupInfo:
+    kind: Literal["cell"]
+    name: str
+    file_path: Path
+    object_count: int
+    object_ids: tuple[str, ...]
 
 
 class ComponentTree(QTreeWidget):
@@ -37,7 +52,6 @@ class ComponentTree(QTreeWidget):
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
         header = self.header()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -46,7 +60,6 @@ class ComponentTree(QTreeWidget):
 
         self._root = QTreeWidgetItem(["Scene", ""])
         self._root.setData(0, OBJECT_ID_ROLE, None)
-        self.addTopLevelItem(self._root)
         self._root.setExpanded(True)
 
         self.currentItemChanged.connect(self._emit_current_object)
@@ -59,8 +72,13 @@ class ComponentTree(QTreeWidget):
         item.setIcon(1, EYE_ICON if obj.visible else EYE_OFF_ICON)
         item.setToolTip(0, self._label_for(obj))
         item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
-        self._root.addChild(item)
-        self._root.setExpanded(True)
+
+        parent = self._parent_for(obj)
+        if parent is self._root:
+            self.addTopLevelItem(item)
+        else:
+            parent.addChild(item)
+        parent.setExpanded(True)
         self.setCurrentItem(item)
 
     def remove_object(self, object_id: str) -> None:
@@ -68,9 +86,14 @@ class ComponentTree(QTreeWidget):
         if item is None:
             return
         parent = item.parent()
-        if parent is not None:
+        if parent is None:
+            top_index = self.indexOfTopLevelItem(item)
+            if top_index >= 0:
+                self.takeTopLevelItem(top_index)
+        else:
             parent.removeChild(item)
-        self.setCurrentItem(self._root)
+            self._remove_empty_groups(parent)
+        self.setCurrentItem(None)
 
     def refresh_object(self, obj: SceneObject) -> None:
         item = self._find_item(obj.id)
@@ -90,18 +113,30 @@ class ComponentTree(QTreeWidget):
 
     def select_object(self, object_id: str | None) -> None:
         if object_id is None:
-            self.setCurrentItem(self._root)
+            self.setCurrentItem(None)
             return
         item = self._find_item(object_id)
         if item is not None:
             self.setCurrentItem(item)
+
+    def group_info_for_item(
+        self, item: QTreeWidgetItem | None
+    ) -> ComponentGroupInfo | None:
+        if item is None:
+            return None
+        return self._group_info(item)
 
     def _emit_current_object(self, current: QTreeWidgetItem | None, _previous) -> None:
         if current is None:
             self.object_selected.emit(None)
             return
         value = current.data(0, OBJECT_ID_ROLE)
-        self.object_selected.emit(value if isinstance(value, str) else None)
+        if isinstance(value, str):
+            self.object_selected.emit(value)
+            return
+
+        group = self._group_info(current)
+        self.object_selected.emit(group)
 
     def _handle_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         if column != 1:
@@ -113,13 +148,90 @@ class ComponentTree(QTreeWidget):
         self.visibility_changed.emit(object_id, not current)
 
     def _find_item(self, object_id: str) -> QTreeWidgetItem | None:
-        for index in range(self._root.childCount()):
-            item = self._root.child(index)
+        pending = self._top_level_items()
+        while pending:
+            item = pending.pop()
             if item.data(0, OBJECT_ID_ROLE) == object_id:
                 return item
+            for index in range(item.childCount()):
+                pending.append(item.child(index))
         return None
 
     def _label_for(self, obj: SceneObject) -> str:
-        if obj.kind == "gds_layer":
-            return f"{obj.name}  L{obj.layer}/{obj.datatype}"
         return obj.name
+
+    def _parent_for(self, obj: SceneObject) -> QTreeWidgetItem:
+        if obj.kind != "gds_layer":
+            return self._root
+
+        return self._find_or_create_group(
+            self._root,
+            f"cell:{obj.file_path}:{obj.cell_name}",
+            kind="cell",
+            name=obj.cell_name,
+            file_path=obj.file_path,
+        )
+
+    def _find_or_create_group(
+        self,
+        parent: QTreeWidgetItem,
+        key: str,
+        kind: Literal["cell"],
+        name: str,
+        file_path: Path,
+    ) -> QTreeWidgetItem:
+        for item in self._children_for(parent):
+            if item.data(0, GROUP_KEY_ROLE) == key:
+                return item
+
+        item = QTreeWidgetItem([name, ""])
+        item.setData(0, OBJECT_ID_ROLE, None)
+        item.setData(0, GROUP_KEY_ROLE, key)
+        item.setData(0, GROUP_KIND_ROLE, kind)
+        item.setData(0, GROUP_NAME_ROLE, name)
+        item.setData(0, GROUP_FILE_ROLE, file_path)
+        item.setToolTip(0, name)
+        if parent is self._root:
+            self.addTopLevelItem(item)
+        else:
+            parent.addChild(item)
+        return item
+
+    def _children_for(self, parent: QTreeWidgetItem) -> list[QTreeWidgetItem]:
+        if parent is self._root:
+            return self._top_level_items()
+        return [parent.child(index) for index in range(parent.childCount())]
+
+    def _top_level_items(self) -> list[QTreeWidgetItem]:
+        return [self.topLevelItem(index) for index in range(self.topLevelItemCount())]
+
+    def _remove_empty_groups(self, item: QTreeWidgetItem) -> None:
+        current = item
+        while current is not self._root and current.childCount() == 0:
+            parent = current.parent()
+            if parent is None:
+                top_index = self.indexOfTopLevelItem(current)
+                if top_index >= 0:
+                    self.takeTopLevelItem(top_index)
+                return
+            parent.removeChild(current)
+            current = parent
+
+    def _group_info(self, item: QTreeWidgetItem) -> ComponentGroupInfo | None:
+        kind = item.data(0, GROUP_KIND_ROLE)
+        name = item.data(0, GROUP_NAME_ROLE)
+        file_path = item.data(0, GROUP_FILE_ROLE)
+        if kind == "cell" and isinstance(name, str) and isinstance(file_path, Path):
+            object_ids: list[str] = []
+            for index in range(item.childCount()):
+                object_id = item.child(index).data(0, OBJECT_ID_ROLE)
+                if isinstance(object_id, str):
+                    object_ids.append(object_id)
+            return ComponentGroupInfo(
+                kind="cell",
+                name=name,
+                file_path=file_path,
+                object_count=item.childCount(),
+                object_ids=tuple(object_ids),
+            )
+        return None

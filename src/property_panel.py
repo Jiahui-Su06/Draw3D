@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from objects import BaseplateObject, GdsLayerObject, SceneObject
+from objects import BaseplateObject, Bounds2D, GdsLayerObject, SceneObject
 
 
 RESET_ICON = QIcon(str(Path(__file__).resolve().parent / "icons" / "reset.svg"))
@@ -49,17 +49,16 @@ class PropertyPanel(QScrollArea):
             return
 
         self._add_text("Name", "name", obj.name)
+        if isinstance(obj, GdsLayerObject):
+            self._add_readonly("Layer", str(obj.layer))
+            self._add_readonly("Datatype", str(obj.datatype))
         self._add_color("Color", "color", obj.color)
-        self._add_float(
-            "Brightness", "brightness", obj.brightness, 0.0, 2.0, step=0.05
-        )
+        self._add_float("Brightness", "brightness", obj.brightness, 0.0, 2.0, step=0.05)
         self._add_float("Opacity", "opacity", obj.opacity, 0.0, 1.0, step=0.05)
 
         if isinstance(obj, GdsLayerObject):
             self._add_readonly("File", _short_path(obj.file_path))
             self._add_readonly("Cell", obj.cell_name)
-            self._add_readonly("Layer", str(obj.layer))
-            self._add_readonly("Datatype", str(obj.datatype))
             self._add_bounds_readonly(obj)
             self._add_float("Z Min", "z_min", obj.z_min, -1_000_000.0, 1_000_000.0)
             self._add_float("Z Max", "z_max", obj.z_max, -1_000_000.0, 1_000_000.0)
@@ -84,6 +83,30 @@ class PropertyPanel(QScrollArea):
         self._object_id = None
         self._add_readonly("Selection", "Scene")
         self._add_readonly("Objects", str(object_count))
+
+    def show_cell_summary(
+        self,
+        name: str,
+        file_path: Path,
+        layer_count: int,
+        bounds: Bounds2D | None,
+        z_min: float | None,
+        z_max: float | None,
+    ) -> None:
+        self._clear()
+        self._object_id = None
+        self._add_readonly("Selection", "Cell")
+        self._add_readonly("Cell", name)
+        self._add_readonly("File", _short_path(file_path))
+        self._add_readonly("Layers", str(layer_count))
+        if bounds is not None:
+            self._add_readonly("X Min", f"{bounds.min_x:.4f}")
+            self._add_readonly("X Max", f"{bounds.max_x:.4f}")
+            self._add_readonly("Y Min", f"{bounds.min_y:.4f}")
+            self._add_readonly("Y Max", f"{bounds.max_y:.4f}")
+        if z_min is not None and z_max is not None:
+            self._add_readonly("Z Min", f"{z_min:.4f}")
+            self._add_readonly("Z Max", f"{z_max:.4f}")
 
     def show_empty(self) -> None:
         self._clear()

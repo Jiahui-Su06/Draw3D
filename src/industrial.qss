@@ -127,8 +127,37 @@ QTreeWidget {
 }
 
 QTreeWidget::item {
-    height: 24px;
+    height: 26px;
     color: #1f2328;
+}
+
+QTreeWidget::indicator,
+QCheckBox::indicator {
+    width: 13px;
+    height: 13px;
+    border: 1px solid #334155;
+    border-radius: 2px;
+    background: #ffffff;
+}
+
+QTreeWidget::indicator:hover,
+QCheckBox::indicator:hover {
+    border-color: #111827;
+    background: #f3f4f6;
+}
+
+QTreeWidget::indicator:checked,
+QCheckBox::indicator:checked {
+    border-color: #111827;
+    background: #ffffff;
+    image: url("$ICON_DIR/check.svg");
+}
+
+QTreeWidget::indicator:indeterminate,
+QCheckBox::indicator:indeterminate {
+    border-color: #111827;
+    background: #ffffff;
+    image: url("$ICON_DIR/dash.svg");
 }
 
 QTreeWidget::item:hover {
@@ -234,18 +263,6 @@ QPushButton#resetButton:hover {
 QCheckBox {
     background: transparent;
     color: #1f2328;
-}
-
-QCheckBox::indicator {
-    width: 14px;
-    height: 14px;
-    border: 1px solid #8c97a3;
-    background: #ffffff;
-}
-
-QCheckBox::indicator:checked {
-    background: #2d6cdf;
-    border-color: #2d6cdf;
 }
 
 QFormLayout,

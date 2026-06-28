@@ -75,7 +75,7 @@ class GdsLayerObject:
 class BaseplateObject:
     name: str
     bounds: Bounds2D
-    z_min: float = -50.0
+    z_min: float = -20.0
     z_max: float = 0.0
     color: str = "#5F6B78"
     brightness: float = 1.0

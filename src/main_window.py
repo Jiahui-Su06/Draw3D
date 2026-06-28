@@ -10,8 +10,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
-from component_tree import ComponentTree
-from gds_loader import GdsLayerData, load_default_gds_layer
+from component_tree import ComponentGroupInfo, ComponentTree
+from gds_import_dialog import GdsImportDialog
+from gds_loader import GdsLayerData, inspect_gds_file, load_gds_layers
 from objects import BaseplateObject, Bounds2D, GdsLayerObject, SceneObject
 from property_panel import PropertyPanel
 from scene import Scene
@@ -62,37 +63,58 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            data = load_default_gds_layer(Path(file_name))
-            obj = GdsLayerObject(
-                name=data.file_path.stem,
-                file_path=data.file_path,
-                cell_name=data.cell_name,
-                layer=data.layer,
-                datatype=data.datatype,
-                bounds=data.bounds,
-            )
-            self.scene.add(obj)
-            self._gds_data[obj.id] = data
-            self.viewport.add_or_update(obj, data.polygons, _gds_cache_key(data))
-            self.component_tree.add_object(obj)
+            file_info = inspect_gds_file(Path(file_name))
+            dialog = GdsImportDialog(file_info, self)
+            if dialog.exec() != GdsImportDialog.DialogCode.Accepted:
+                return
+
+            layers = load_gds_layers(file_info.file_path, dialog.selected_layers())
+            if not layers:
+                return
+
+            for data in layers:
+                obj = GdsLayerObject(
+                    name=f"L{data.layer}/{data.datatype}",
+                    file_path=data.file_path,
+                    cell_name=data.cell_name,
+                    layer=data.layer,
+                    datatype=data.datatype,
+                    bounds=data.bounds,
+                )
+                self.scene.add(obj)
+                self._gds_data[obj.id] = data
+                self.viewport.add_or_update(obj, data.polygons, _gds_cache_key(data))
+                self.component_tree.add_object(obj)
             self.viewport.reset_camera()
-            self.statusBar().showMessage(f"Imported {data.file_path.name}")
+            self.statusBar().showMessage(
+                f"Imported {len(layers)} layer(s) from {file_info.file_path.name}"
+            )
         except Exception as exc:
             self._show_error("Import failed", str(exc))
 
     def create_baseplate(self) -> None:
         bounds = self._default_baseplate_bounds()
-        index = self.scene.count() + 1
-        obj = BaseplateObject(name=f"Baseplate {index}", bounds=bounds)
+        obj = BaseplateObject(name=self._next_baseplate_name(), bounds=bounds)
         try:
+            should_reset_camera = self.scene.count() == 0
             self.scene.add(obj)
             self.viewport.add_or_update(obj)
             self.component_tree.add_object(obj)
+            if should_reset_camera:
+                self.viewport.reset_camera()
             self.statusBar().showMessage(f"Created {obj.name}")
         except Exception as exc:
             self._show_error("Create baseplate failed", str(exc))
 
     def delete_selected(self) -> None:
+        current_item = self.component_tree.currentItem()
+        group_info = self.component_tree.group_info_for_item(current_item)
+        if group_info is not None:
+            self._delete_objects(
+                group_info.object_ids, f"Deleted cell {group_info.name}"
+            )
+            return
+
         object_id = self.component_tree.current_object_id()
         if object_id is None:
             return
@@ -101,12 +123,24 @@ class MainWindow(QMainWindow):
         if obj is None:
             return
 
-        self.scene.remove(object_id)
-        self._gds_data.pop(object_id, None)
-        self.viewport.remove_object(object_id)
-        self.component_tree.remove_object(object_id)
+        self._delete_objects((object_id,), f"Deleted {obj.name}")
+
+    def _delete_objects(self, object_ids: tuple[str, ...], status_message: str) -> None:
+        deleted = False
+        for object_id in object_ids:
+            if self.scene.get(object_id) is None:
+                continue
+            self.scene.remove(object_id)
+            self._gds_data.pop(object_id, None)
+            self.viewport.remove_object(object_id)
+            self.component_tree.remove_object(object_id)
+            deleted = True
+
+        if not deleted:
+            return
+
         self.property_panel.show_scene_summary(self.scene.count())
-        self.statusBar().showMessage(f"Deleted {obj.name}")
+        self.statusBar().showMessage(status_message)
 
     def _create_docks(self) -> None:
         self.left_dock = QDockWidget("Components", self)
@@ -178,6 +212,21 @@ class MainWindow(QMainWindow):
         self.viewport.set_axes_visible(self._ui_settings.show_axes)
 
     def _select_object(self, object_id: object) -> None:
+        if isinstance(object_id, ComponentGroupInfo):
+            bounds = self._bounds_for_objects(object_id.object_ids)
+            z_range = self._z_range_for_objects(object_id.object_ids)
+            self.property_panel.show_cell_summary(
+                object_id.name,
+                object_id.file_path,
+                object_id.object_count,
+                bounds,
+                z_range[0] if z_range is not None else None,
+                z_range[1] if z_range is not None else None,
+            )
+            self.viewport.highlight_objects(list(object_id.object_ids))
+            self.statusBar().showMessage(f"Selected cell {object_id.name}")
+            return
+
         if not isinstance(object_id, str):
             self.property_panel.show_scene_summary(self.scene.count())
             self.viewport.highlight_object(None)
@@ -323,16 +372,57 @@ class MainWindow(QMainWindow):
             self.viewport.highlight_object(obj.id)
 
     def _default_baseplate_bounds(self) -> Bounds2D:
-        selected_id = self.component_tree.current_object_id()
-        selected = self.scene.get(selected_id) if selected_id is not None else None
-        if selected is not None:
-            return selected.bounds
+        current = self.component_tree.currentItem()
+        group_info = self.component_tree.group_info_for_item(current)
+        if group_info is not None:
+            bounds = self._bounds_for_objects(group_info.object_ids)
+            if bounds is not None:
+                return bounds
 
-        objects = self.scene.objects()
-        if objects:
-            return objects[-1].bounds
+        gds_objects = [
+            obj for obj in self.scene.objects() if isinstance(obj, GdsLayerObject)
+        ]
+        if gds_objects:
+            return _merge_bounds([obj.bounds for obj in gds_objects])
 
         return Bounds2D(min_x=-100.0, min_y=-100.0, max_x=100.0, max_y=100.0)
+
+    def _next_baseplate_name(self) -> str:
+        used_indices: set[int] = set()
+        prefix = "Baseplate "
+        for obj in self.scene.objects():
+            if not isinstance(obj, BaseplateObject):
+                continue
+            if not obj.name.startswith(prefix):
+                continue
+            suffix = obj.name[len(prefix) :]
+            if suffix.isdecimal():
+                used_indices.add(int(suffix))
+
+        index = 1
+        while index in used_indices:
+            index += 1
+        return f"{prefix}{index}"
+
+    def _bounds_for_objects(self, object_ids: tuple[str, ...]) -> Bounds2D | None:
+        objects = [self.scene.get(object_id) for object_id in object_ids]
+        bounds = [obj.bounds for obj in objects if obj is not None]
+        if not bounds:
+            return None
+
+        return _merge_bounds(bounds)
+
+    def _z_range_for_objects(
+        self, object_ids: tuple[str, ...]
+    ) -> tuple[float, float] | None:
+        objects = [self.scene.get(object_id) for object_id in object_ids]
+        z_ranges = [(obj.z_min, obj.z_max) for obj in objects if obj is not None]
+        if not z_ranges:
+            return None
+        return (
+            min(z_min for z_min, _z_max in z_ranges),
+            max(z_max for _z_min, z_max in z_ranges),
+        )
 
     def _show_error(self, title: str, message: str) -> None:
         self.statusBar().showMessage(message)
@@ -356,3 +446,14 @@ def _settings_int(
     except (TypeError, ValueError):
         return default
     return max(minimum, min(number, maximum))
+
+
+def _merge_bounds(bounds: list[Bounds2D]) -> Bounds2D:
+    if not bounds:
+        raise ValueError("cannot merge empty bounds")
+    return Bounds2D(
+        min_x=min(bound.min_x for bound in bounds),
+        min_y=min(bound.min_y for bound in bounds),
+        max_x=max(bound.max_x for bound in bounds),
+        max_y=max(bound.max_y for bound in bounds),
+    )
