@@ -25,6 +25,7 @@ class Viewport(QWidget):
         self._actors: dict[str, object] = {}
         self._mesh_cache: OrderedDict[MeshCacheKey, pv.PolyData] = OrderedDict()
         self._selection_actor: object | None = None
+        self._axes_visible = True
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -32,6 +33,17 @@ class Viewport(QWidget):
 
         self.plotter.set_background("#FFFFFF")
         self.plotter.add_axes()
+
+    def set_axes_visible(self, visible: bool) -> None:
+        if self._axes_visible == visible:
+            return
+
+        self._axes_visible = visible
+        if visible:
+            self.plotter.show_axes()
+        else:
+            self.plotter.hide_axes()
+        self.plotter.render()
 
     def add_or_update(
         self,

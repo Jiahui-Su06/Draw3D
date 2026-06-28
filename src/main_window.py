@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import (
     QFileDialog,
     QDockWidget,
     QMainWindow,
     QMessageBox,
-    QToolBar,
 )
 
 from component_tree import ComponentTree
@@ -16,6 +15,12 @@ from gds_loader import GdsLayerData, load_default_gds_layer
 from objects import BaseplateObject, Bounds2D, GdsLayerObject, SceneObject
 from property_panel import PropertyPanel
 from scene import Scene
+from ui_settings_dialog import (
+    LEFT_PANEL_MIN_WIDTH_DEFAULT,
+    RIGHT_PANEL_MIN_WIDTH_DEFAULT,
+    UiSettings,
+    UiSettingsDialog,
+)
 from viewport import Viewport
 
 
@@ -27,6 +32,8 @@ class MainWindow(QMainWindow):
 
         self.scene = Scene()
         self._gds_data: dict[str, GdsLayerData] = {}
+        self._settings = QSettings("Draw3D", "Draw3D")
+        self._ui_settings = self._load_ui_settings()
 
         self.viewport = Viewport(self)
         self.component_tree = ComponentTree(self)
@@ -34,7 +41,8 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(self.viewport)
         self._create_docks()
-        self._create_toolbar()
+        self._create_menu_bar()
+        self._apply_ui_settings()
         self.statusBar().showMessage("Ready")
 
         self.component_tree.object_selected.connect(self._select_object)
@@ -101,27 +109,73 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Deleted {obj.name}")
 
     def _create_docks(self) -> None:
-        left_dock = QDockWidget("Components", self)
-        left_dock.setObjectName("componentsDock")
-        left_dock.setWidget(self.component_tree)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, left_dock)
+        self.left_dock = QDockWidget("Components", self)
+        self.left_dock.setObjectName("componentsDock")
+        self.left_dock.setWidget(self.component_tree)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.left_dock)
 
-        right_dock = QDockWidget("Properties", self)
-        right_dock.setObjectName("propertiesDock")
-        right_dock.setWidget(self.property_panel)
-        right_dock.setMinimumWidth(360)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, right_dock)
-        self.resizeDocks([right_dock], [390], Qt.Orientation.Horizontal)
+        self.right_dock = QDockWidget("Properties", self)
+        self.right_dock.setObjectName("propertiesDock")
+        self.right_dock.setWidget(self.property_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.right_dock)
 
-    def _create_toolbar(self) -> None:
-        toolbar = QToolBar("Tools", self)
-        toolbar.setMovable(False)
-        toolbar.addAction("Import GDS", self.import_gds)
-        toolbar.addAction("Create Baseplate", self.create_baseplate)
-        toolbar.addAction("Delete", self.delete_selected)
-        toolbar.addSeparator()
-        toolbar.addAction("Reset Camera", self.viewport.reset_camera)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+    def _create_menu_bar(self) -> None:
+        file_menu = self.menuBar().addMenu("&File")
+        file_menu.addAction("Import GDS", self.import_gds)
+
+        edit_menu = self.menuBar().addMenu("&Edit")
+        edit_menu.addAction("Create Baseplate", self.create_baseplate)
+        edit_menu.addAction("Delete", self.delete_selected)
+        edit_menu.addSeparator()
+        edit_menu.addAction("Reset Camera", self.viewport.reset_camera)
+
+        settings_menu = self.menuBar().addMenu("&Settings")
+        settings_menu.addAction("UI Settings", self.open_ui_settings)
+
+    def open_ui_settings(self) -> None:
+        dialog = UiSettingsDialog(self._ui_settings, self)
+        if dialog.exec() != UiSettingsDialog.DialogCode.Accepted:
+            return
+
+        self._ui_settings = dialog.settings()
+        self._save_ui_settings(self._ui_settings)
+        self._apply_ui_settings()
+        self.statusBar().showMessage("Updated UI settings")
+
+    def _load_ui_settings(self) -> UiSettings:
+        left_width = _settings_int(
+            self._settings,
+            "ui/leftPanelMinWidth",
+            LEFT_PANEL_MIN_WIDTH_DEFAULT,
+            minimum=120,
+            maximum=800,
+        )
+        right_width = _settings_int(
+            self._settings,
+            "ui/rightPanelMinWidth",
+            RIGHT_PANEL_MIN_WIDTH_DEFAULT,
+            minimum=120,
+            maximum=800,
+        )
+        show_axes = self._settings.value("ui/showAxes", True, type=bool)
+        return UiSettings(left_width, right_width, bool(show_axes))
+
+    def _save_ui_settings(self, settings: UiSettings) -> None:
+        self._settings.setValue("ui/leftPanelMinWidth", settings.left_panel_min_width)
+        self._settings.setValue("ui/rightPanelMinWidth", settings.right_panel_min_width)
+        self._settings.setValue("ui/showAxes", settings.show_axes)
+
+    def _apply_ui_settings(self) -> None:
+        left_width = self._ui_settings.left_panel_min_width
+        right_width = self._ui_settings.right_panel_min_width
+        self.left_dock.setMinimumWidth(left_width)
+        self.right_dock.setMinimumWidth(right_width)
+        self.resizeDocks(
+            [self.left_dock, self.right_dock],
+            [left_width, right_width],
+            Qt.Orientation.Horizontal,
+        )
+        self.viewport.set_axes_visible(self._ui_settings.show_axes)
 
     def _select_object(self, object_id: object) -> None:
         if not isinstance(object_id, str):
@@ -287,3 +341,18 @@ class MainWindow(QMainWindow):
 
 def _gds_cache_key(data: GdsLayerData) -> tuple[str, str, int, int]:
     return (str(data.file_path), data.cell_name, data.layer, data.datatype)
+
+
+def _settings_int(
+    settings: QSettings,
+    key: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = settings.value(key, default)
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(number, maximum))
