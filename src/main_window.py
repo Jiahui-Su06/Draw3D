@@ -41,6 +41,7 @@ from viewport import Viewport
 
 ExportFormat = ExportDialogFormat
 UNDO_STACK_COUNT_MAX = 100
+LAST_DIALOG_DIR_KEY = "paths/lastDialogDirectory"
 LANGUAGE_LABEL_KEYS = {
     "en": "language.english",
     "zh-CN": "language.simplified_chinese",
@@ -89,12 +90,13 @@ class MainWindow(QMainWindow):
         file_name, _ = QFileDialog.getOpenFileName(
             self,
             tr("dialog.import_gds"),
-            str(Path.cwd()),
+            self._dialog_start_path(),
             _file_filter("filter.gds"),
         )
         if not file_name:
             return
 
+        self._remember_dialog_path(Path(file_name))
         try:
             file_info = inspect_gds_file(Path(file_name))
             dialog = GdsImportDialog(file_info, self)
@@ -147,12 +149,13 @@ class MainWindow(QMainWindow):
         file_name, _ = QFileDialog.getOpenFileName(
             self,
             tr("dialog.open_project"),
-            str(Path.cwd()),
+            self._dialog_start_path(),
             _file_filter("filter.gds3d"),
         )
         if not file_name:
             return
 
+        self._remember_dialog_path(Path(file_name))
         try:
             self._load_project(Path(file_name))
             self._clear_undo_history()
@@ -194,13 +197,14 @@ class MainWindow(QMainWindow):
         file_name, _ = QFileDialog.getSaveFileName(
             self,
             tr("dialog.export_project"),
-            str(Path.cwd() / "project.gds3d"),
+            self._dialog_start_path("project.gds3d"),
             _file_filter("filter.gds3d"),
         )
         if not file_name:
             return
 
         path = self._ensure_suffix(Path(file_name), "gds3d")
+        self._remember_dialog_path(path)
         try:
             self._write_project(path)
             self.statusBar().showMessage(tr("status.exported", name=path.name))
@@ -833,13 +837,14 @@ class MainWindow(QMainWindow):
         file_name, _ = QFileDialog.getSaveFileName(
             self,
             _export_title(file_format),
-            str(Path.cwd() / default_name),
+            self._dialog_start_path(default_name),
             _export_filter(file_format),
         )
         if not file_name:
             return
 
         path = self._ensure_suffix(Path(file_name), file_format)
+        self._remember_dialog_path(path)
         try:
             self._export_by_format(path, file_format, image_size)
             self.statusBar().showMessage(tr("status.exported", name=path.name))
@@ -1008,6 +1013,28 @@ class MainWindow(QMainWindow):
         if file_path.suffix.lower() == f".{suffix}":
             return file_path
         return file_path.with_suffix(f".{suffix}")
+
+    def _dialog_start_path(self, default_name: str | None = None) -> str:
+        directory = self._last_dialog_directory()
+        if default_name is None:
+            return str(directory)
+        return str(directory / default_name)
+
+    def _last_dialog_directory(self) -> Path:
+        value = self._settings.value(LAST_DIALOG_DIR_KEY)
+        if isinstance(value, str):
+            path = Path(value).expanduser()
+            if path.is_dir():
+                return path
+        home = Path.home()
+        if home.is_dir():
+            return home
+        return Path.cwd()
+
+    def _remember_dialog_path(self, file_path: Path) -> None:
+        directory = file_path if file_path.is_dir() else file_path.parent
+        if directory.is_dir():
+            self._settings.setValue(LAST_DIALOG_DIR_KEY, str(directory))
 
 
 def _gds_cache_key(data: GdsLayerData) -> tuple[str, str, int, int]:
