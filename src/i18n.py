@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from typing import Any
+
+from paths import resource_path
 
 
 DEFAULT_LOCALE = "en"
 LOCALE_ENV_VAR = "GDS3D_LOCALE"
 SUPPORTED_LOCALES = ("en", "zh-CN")
 
-_LOCALE_DIR = Path(__file__).resolve().parent.parent / "i18n"
+_LOCALE_DIR = resource_path("i18n")
 _catalog_cache: dict[str, dict[str, str]] = {}
 _locale = os.environ.get(LOCALE_ENV_VAR, DEFAULT_LOCALE)
 

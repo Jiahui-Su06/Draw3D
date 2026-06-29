@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
 
 os.environ.setdefault("QT_API", "pyside6")
@@ -23,9 +22,11 @@ def main() -> int:
 
 
 def _apply_style(app) -> None:
-    qss_path = Path(__file__).resolve().parent / "industrial.qss"
+    from paths import source_resource_path
+
+    qss_path = source_resource_path("industrial.qss")
     if qss_path.exists():
-        icon_dir = (Path(__file__).resolve().parent / "icons").as_posix()
+        icon_dir = source_resource_path("icons").as_posix()
         qss = qss_path.read_text(encoding="utf-8").replace("$ICON_DIR", icon_dir)
         app.setStyleSheet(qss)
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable
 
 from PySide6.QtGui import QIcon
@@ -17,11 +16,12 @@ from PySide6.QtWidgets import (
 )
 
 from i18n import tr
+from paths import source_resource_path
 
 
 LEFT_PANEL_MIN_WIDTH_DEFAULT = 220
 RIGHT_PANEL_MIN_WIDTH_DEFAULT = 360
-RESET_ICON = QIcon(str(Path(__file__).resolve().parent / "icons" / "reset.svg"))
+RESET_ICON = QIcon(str(source_resource_path("icons", "reset.svg")))
 
 
 @dataclass(frozen=True)

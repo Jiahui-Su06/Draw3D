@@ -1,0 +1,134 @@
+name: Build installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example v0.1.0"
+        required: true
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.id }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: windows-x64
+            runner: windows-2025
+            platform: windows
+            arch: x64
+          - id: windows-arm64
+            runner: windows-11-arm
+            platform: windows
+            arch: arm64
+          - id: linux-x64
+            runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+          - id: linux-arm64
+            runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+          - id: macos-x64
+            runner: macos-15-intel
+            platform: macos
+            arch: x64
+          - id: macos-arm64
+            runner: macos-15
+            platform: macos
+            arch: arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install Linux runtime libraries
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libegl1 \
+            libgl1 \
+            libqhull-dev \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-render-util0 \
+            libxcb-xinerama0
+
+      - name: Install NSIS
+        if: matrix.platform == 'windows'
+        run: choco install nsis -y --no-progress
+
+      - name: Add NSIS to PATH
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files (x86)\NSIS'
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Validate release version
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          if [[ ! "${{ inputs.version }}" =~ ^v[0-9]+(\.[0-9]+)*([-.][A-Za-z0-9]+)*$ ]]; then
+            echo "Version must look like v0.1.0"
+            exit 1
+          fi
+
+      - name: Lint
+        run: uv run --with ruff==0.15.13 ruff check .
+
+      - name: Build application
+        run: uv run --with pyinstaller==6.21.0 python packaging/build_app.py
+
+      - name: Package installer
+        run: uv run python packaging/package_installer.py --platform "${{ matrix.platform }}" --arch "${{ matrix.arch }}" --version "${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.id }}-installer
+          path: dist/installers/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release assets
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v5
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          files: release-artifacts/*

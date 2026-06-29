@@ -19,9 +19,10 @@ from PySide6.QtWidgets import (
 
 from i18n import tr
 from objects import BaseplateObject, Bounds2D, GdsLayerObject, SceneObject
+from paths import source_resource_path
 
 
-RESET_ICON = QIcon(str(Path(__file__).resolve().parent / "icons" / "reset.svg"))
+RESET_ICON = QIcon(str(source_resource_path("icons", "reset.svg")))
 
 
 class PropertyPanel(QScrollArea):

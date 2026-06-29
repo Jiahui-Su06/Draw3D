@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
 from PySide6.QtWidgets import (
@@ -15,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from i18n import tr
+from paths import source_resource_path
 
 
 ExportFormat = Literal["png", "svg", "pdf", "gltf"]
@@ -298,4 +298,4 @@ def _safe_image_size(size: tuple[int, int]) -> tuple[int, int]:
 
 
 def _icon_path(name: str) -> str:
-    return (Path(__file__).resolve().parent / "icons" / name).as_posix()
+    return source_resource_path("icons", name).as_posix()

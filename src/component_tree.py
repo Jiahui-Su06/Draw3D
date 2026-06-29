@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from i18n import tr
 from objects import SceneObject
+from paths import source_resource_path
 
 
 OBJECT_ID_ROLE = Qt.ItemDataRole.UserRole
@@ -25,7 +26,7 @@ GROUP_KIND_ROLE = Qt.ItemDataRole.UserRole + 3
 GROUP_NAME_ROLE = Qt.ItemDataRole.UserRole + 4
 GROUP_FILE_ROLE = Qt.ItemDataRole.UserRole + 5
 
-ICON_DIR = Path(__file__).resolve().parent / "icons"
+ICON_DIR = source_resource_path("icons")
 EYE_ICON = QIcon(str(ICON_DIR / "eye.svg"))
 EYE_OFF_ICON = QIcon(str(ICON_DIR / "eye_off.svg"))
 
