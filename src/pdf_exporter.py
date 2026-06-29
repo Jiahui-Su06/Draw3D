@@ -15,7 +15,10 @@ from viewport import Viewport
 
 
 def export_scene_pdf(
-    file_path: Path, viewport: Viewport, objects: list[SceneObject]
+    file_path: Path,
+    viewport: Viewport,
+    objects: list[SceneObject],
+    image_scale: int = 1,
 ) -> None:
     path = file_path.expanduser().resolve()
     if path.suffix.lower() != ".pdf":
@@ -24,7 +27,7 @@ def export_scene_pdf(
     with TemporaryDirectory() as temp_dir:
         temp_dir_path = Path(temp_dir)
         screenshot_path = temp_dir_path / "scene.png"
-        viewport.export_png(screenshot_path)
+        viewport.export_png(screenshot_path, image_scale=image_scale)
         _build_pdf(path, screenshot_path, objects)
 
 

@@ -1,105 +1,191 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from PySide6.QtWidgets import (
-    QButtonGroup,
+    QComboBox,
     QDialog,
-    QDialogButtonBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QVBoxLayout,
-    QWidget,
 )
 
 from i18n import tr
 
 
-ExportFormat = Literal["png", "svg", "pdf", "gltf"]
+ExportFormat = Literal["png", "svg", "pdf"]
+ExportQuality = Literal["standard", "high"]
 
-EXPORT_FORMATS: tuple[ExportFormat, ...] = ("png", "svg", "pdf", "gltf")
+EXPORT_FORMATS: tuple[ExportFormat, ...] = ("png", "svg", "pdf")
+EXPORT_QUALITIES: tuple[ExportQuality, ...] = ("standard", "high")
+EXPORT_QUALITY_SCALES: dict[ExportQuality, int] = {
+    "standard": 2,
+    "high": 4,
+}
 
 
 @dataclass(frozen=True)
 class ExportOptions:
     file_format: ExportFormat
+    image_scale: int
 
 
 class ExportDialog(QDialog):
     def __init__(
         self,
         default_format: ExportFormat,
-        parent: QWidget | None = None,
+        default_quality: ExportQuality,
+        parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("dialog.export_as"))
         self.setModal(True)
+        self.setMinimumSize(330, 230)
 
-        self._format_group = QButtonGroup(self)
-        self._format_group.setExclusive(True)
-        format_layout = QHBoxLayout()
-        format_layout.setSpacing(10)
-        format_layout.setContentsMargins(0, 0, 0, 0)
+        self._format_combo = QComboBox()
+        self._format_combo.setObjectName("formatCombo")
         for file_format in EXPORT_FORMATS:
-            button = QPushButton()
-            button.setText(_format_label(file_format))
-            button.setCheckable(True)
-            button.setMinimumWidth(104)
-            button.setMinimumHeight(38)
-            self._format_group.addButton(button)
-            button.setProperty("fileFormat", file_format)
-            format_layout.addWidget(button)
-            if file_format == default_format:
-                button.setChecked(True)
+            self._format_combo.addItem(_format_label(file_format), file_format)
+        format_index = self._format_combo.findData(default_format)
+        self._format_combo.setCurrentIndex(max(format_index, 0))
+        self._format_combo.currentIndexChanged.connect(self._sync_quality_visibility)
 
-        if self._format_group.checkedButton() is None:
-            first_button = self._format_group.buttons()[0]
-            first_button.setChecked(True)
+        self._quality_label = _section_label(tr("export.quality"))
+        self._quality_combo = QComboBox()
+        self._quality_combo.setObjectName("qualityCombo")
+        for quality in EXPORT_QUALITIES:
+            self._quality_combo.addItem(tr(f"export.quality_{quality}"), quality)
+        quality_index = self._quality_combo.findData(default_quality)
+        self._quality_combo.setCurrentIndex(max(quality_index, 0))
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        ok_button = QPushButton("OK")
+        cancel_button = QPushButton("Cancel")
+        ok_button.setObjectName("dialogButton")
+        cancel_button.setObjectName("dialogButton")
+        ok_button.clicked.connect(self.accept)
+        cancel_button.clicked.connect(self.reject)
+        button_layout = QHBoxLayout()
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(8)
+        button_layout.addStretch(1)
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        button_layout.addStretch(1)
+
+        settings_layout = QVBoxLayout()
+        settings_layout.setContentsMargins(20, 20, 20, 18)
+        settings_layout.setSpacing(10)
+        settings_layout.addWidget(_section_label(tr("export.format")))
+        settings_layout.addWidget(self._format_combo)
+        settings_layout.addSpacing(10)
+        settings_layout.addWidget(self._quality_label)
+        settings_layout.addWidget(self._quality_combo)
+        settings_layout.addStretch(1)
+        settings_layout.addLayout(button_layout)
+
+        settings_frame = QFrame()
+        settings_frame.setObjectName("exportSettings")
+        settings_frame.setLayout(settings_layout)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-        layout.addWidget(QLabel(tr("export.format")))
-        layout.addLayout(format_layout)
-        layout.addWidget(buttons)
-        layout.setStretch(1, 1)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+        layout.addWidget(settings_frame)
+
         self.setStyleSheet(
             """
-            QPushButton {
-                padding: 8px 16px;
-                border-radius: 8px;
-                border: 1px solid #c5ccd4;
+            QDialog {
+                background: #f6f7f9;
+            }
+            QFrame#exportSettings {
+                min-width: 300px;
+                background: #f6f7f9;
+            }
+            QLabel[role="section"] {
+                color: #1f2328;
+                font-weight: 600;
+                background: transparent;
+            }
+            QComboBox#formatCombo,
+            QComboBox#qualityCombo {
+                min-height: 30px;
+                padding: 3px 28px 3px 8px;
+                border: 1px solid #b8c2cc;
+                border-radius: 2px;
                 background: #ffffff;
                 color: #1f2328;
             }
-            QPushButton:hover {
-                background: #f3f6fa;
+            QComboBox#formatCombo:hover,
+            QComboBox#qualityCombo:hover {
+                border-color: #6d8fbd;
+                background: #f9fbfd;
             }
-            QPushButton:checked {
-                background: #2d6cdf;
-                color: #ffffff;
-                border-color: #2d6cdf;
+            QComboBox#formatCombo::drop-down,
+            QComboBox#qualityCombo::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 24px;
+                border-left: 1px solid #9aa8b8;
+                background: #dce5ef;
             }
-            QPushButton:checked:hover {
-                background: #255ac4;
+            QComboBox#formatCombo::drop-down:hover,
+            QComboBox#qualityCombo::drop-down:hover {
+                background: #9fbce3;
+            }
+            QComboBox#formatCombo::down-arrow,
+            QComboBox#qualityCombo::down-arrow {
+                image: url("$SPIN_DOWN_ICON");
+                width: 8px;
+                height: 8px;
+            }
+            QPushButton#dialogButton {
+                min-width: 78px;
+                min-height: 28px;
+                padding: 3px 10px;
+                border: 1px solid #b8c2cc;
+                border-radius: 2px;
+                background: #ffffff;
+                color: #1f2328;
+            }
+            QPushButton#dialogButton:hover {
+                background: #b9d0ee;
+                border-color: #6d8fbd;
             }
             """
+            .replace("$SPIN_DOWN_ICON", _icon_path("spin_down.svg"))
         )
 
     def options(self) -> ExportOptions:
-        button = self._format_group.checkedButton()
-        file_format = button.property("fileFormat") if button is not None else None
-        if file_format not in EXPORT_FORMATS:
-            file_format = "png"
-        return ExportOptions(file_format=file_format)
+        file_format = self._current_format()
+        quality = self._quality_combo.currentData()
+        if quality not in EXPORT_QUALITIES:
+            quality = "standard"
+        return ExportOptions(
+            file_format=file_format,
+            image_scale=EXPORT_QUALITY_SCALES[quality],
+        )
+
+    def _current_format(self) -> ExportFormat:
+        value = self._format_combo.currentData()
+        if value in EXPORT_FORMATS:
+            return value
+        return "png"
+
+    def _sync_quality_visibility(self) -> None:
+        file_format = self._current_format()
+        has_quality = file_format in {"png", "pdf"}
+        self._quality_label.setVisible(has_quality)
+        self._quality_combo.setVisible(has_quality)
+
+
+def _section_label(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setProperty("role", "section")
+    return label
 
 
 def _format_label(file_format: ExportFormat) -> str:
@@ -107,6 +193,8 @@ def _format_label(file_format: ExportFormat) -> str:
         return "PNG"
     if file_format == "svg":
         return "SVG"
-    if file_format == "pdf":
-        return "PDF"
-    return "glTF"
+    return "PDF"
+
+
+def _icon_path(name: str) -> str:
+    return (Path(__file__).resolve().parent / "icons" / name).as_posix()

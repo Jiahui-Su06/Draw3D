@@ -17,6 +17,7 @@ from objects import BaseplateObject, GdsLayerObject, SceneObject
 
 MeshCacheKey = tuple[str, str, int, int]
 MESH_CACHE_COUNT_MAX = 16
+SCREENSHOT_PIXEL_COUNT_MAX = 40_000_000
 
 
 class Viewport(QWidget):
@@ -201,9 +202,14 @@ class Viewport(QWidget):
         self.plotter.reset_camera()
         self.plotter.render()
 
-    def export_png(self, file_path: Path) -> None:
+    def export_png(self, file_path: Path, image_scale: int = 1) -> None:
         self.plotter.render()
-        self.plotter.screenshot(str(file_path), transparent_background=False)
+        scale = self._safe_image_scale(image_scale)
+        self.plotter.screenshot(
+            str(file_path),
+            transparent_background=False,
+            scale=scale,
+        )
 
     def export_svg(self, file_path: Path) -> None:
         self._export_gl2ps(file_path, "svg")
@@ -259,6 +265,15 @@ class Viewport(QWidget):
         if render_window is None:
             raise RuntimeError(tr("error.render_window_unavailable"))
         return render_window
+
+    def _safe_image_scale(self, requested_scale: int) -> int:
+        scale = max(1, min(int(requested_scale), 4))
+        width, height = self.plotter.window_size
+        pixel_count = int(width) * int(height) * scale * scale
+        while scale > 1 and pixel_count > SCREENSHOT_PIXEL_COUNT_MAX:
+            scale -= 1
+            pixel_count = int(width) * int(height) * scale * scale
+        return scale
 
     def _export_gl2ps(self, file_path: Path, file_format: str) -> None:
         from vtkmodules.vtkIOExportGL2PS import vtkGL2PSExporter
