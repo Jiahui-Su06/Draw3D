@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from typing import Callable
 
 from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
     QDockWidget,
@@ -19,7 +20,11 @@ from gds_import_dialog import GdsImportDialog
 from gds_loader import GdsLayerData, inspect_gds_file, load_gds_layers
 from objects import BaseplateObject, Bounds2D, GdsLayerObject, SceneObject
 from pdf_exporter import export_scene_pdf
-from project_archive import ProjectArchiveObject, read_project_archive, write_project_archive
+from project_archive import (
+    ProjectArchiveObject,
+    read_project_archive,
+    write_project_archive,
+)
 from property_panel import PropertyPanel
 from scene import Scene
 from ui_settings_dialog import (
@@ -31,6 +36,9 @@ from ui_settings_dialog import (
 from viewport import Viewport
 
 
+UNDO_STACK_COUNT_MAX = 100
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -40,6 +48,9 @@ class MainWindow(QMainWindow):
         self.scene = Scene()
         self._gds_data: dict[str, GdsLayerData] = {}
         self._project_temp_dir: TemporaryDirectory[str] | None = None
+        self._undo_stack: list[tuple[str, Callable[[], None]]] = []
+        self._undo_action: QAction | None = None
+        self._is_restoring = False
         self._settings = QSettings("GDS3D", "GDS3D")
         self._ui_settings = self._load_ui_settings()
 
@@ -55,6 +66,8 @@ class MainWindow(QMainWindow):
 
         self.component_tree.object_selected.connect(self._select_object)
         self.component_tree.visibility_changed.connect(self._set_visibility)
+        self.component_tree.group_visibility_changed.connect(self._set_group_visibility)
+        self.component_tree.delete_requested.connect(self._delete_requested)
         self.property_panel.property_changed.connect(self._update_property)
         self.property_panel.reset_requested.connect(self._reset_property)
         self.property_panel.show_scene_summary(self.scene.count())
@@ -79,6 +92,7 @@ class MainWindow(QMainWindow):
             if not layers:
                 return
 
+            imported_entries: list[tuple[SceneObject, GdsLayerData]] = []
             for data in layers:
                 obj = GdsLayerObject(
                     name=f"L{data.layer}/{data.datatype}",
@@ -94,6 +108,17 @@ class MainWindow(QMainWindow):
                 self._gds_data[obj.id] = data
                 self.viewport.add_or_update(obj, data.polygons, _gds_cache_key(data))
                 self.component_tree.add_object(obj)
+                imported_entries.append((obj, data))
+
+            self._push_undo(
+                "Import GDS",
+                lambda object_ids=tuple(obj.id for obj, _data in imported_entries): (
+                    self._delete_objects(
+                        object_ids,
+                        "Removed imported GDS layers",
+                    )
+                ),
+            )
             self.viewport.reset_camera()
             self.statusBar().showMessage(
                 f"Imported {len(layers)} layer(s) from {file_info.file_path.name}"
@@ -113,15 +138,20 @@ class MainWindow(QMainWindow):
 
         try:
             self._load_project(Path(file_name))
+            self._clear_undo_history()
             self.statusBar().showMessage(f"Opened {Path(file_name).name}")
         except Exception as exc:
             self._show_error("Open project failed", str(exc))
 
     def export_view_as_png(self) -> None:
-        self._export_view("Export View", "PNG Files (*.png)", "png", self.viewport.export_png)
+        self._export_view(
+            "Export View", "PNG Files (*.png)", "png", self.viewport.export_png
+        )
 
     def export_view_as_svg(self) -> None:
-        self._export_view("Export View", "SVG Files (*.svg)", "svg", self.viewport.export_svg)
+        self._export_view(
+            "Export View", "SVG Files (*.svg)", "svg", self.viewport.export_svg
+        )
 
     def export_view_as_pdf(self) -> None:
         self._export_view("Export View", "PDF Files (*.pdf)", "pdf", self._export_pdf)
@@ -159,6 +189,10 @@ class MainWindow(QMainWindow):
             self.scene.add(obj)
             self.viewport.add_or_update(obj)
             self.component_tree.add_object(obj)
+            self._push_undo(
+                "Create Baseplate",
+                lambda object_id=obj.id: self.delete_selected_object(object_id),
+            )
             if should_reset_camera:
                 self.viewport.reset_camera()
             self.statusBar().showMessage(f"Created {obj.name}")
@@ -184,22 +218,47 @@ class MainWindow(QMainWindow):
 
         self._delete_objects((object_id,), f"Deleted {obj.name}")
 
-    def _delete_objects(self, object_ids: tuple[str, ...], status_message: str) -> None:
+    def _delete_objects(
+        self, object_ids: tuple[str, ...], status_message: str
+    ) -> tuple[tuple[SceneObject, GdsLayerData | None], ...]:
+        deleted_entries: list[tuple[SceneObject, GdsLayerData | None]] = []
         deleted = False
         for object_id in object_ids:
-            if self.scene.get(object_id) is None:
+            obj = self.scene.get(object_id)
+            if obj is None:
                 continue
-            self.scene.remove(object_id)
-            self._gds_data.pop(object_id, None)
+            removed_obj = self.scene.remove(object_id)
+            gds_data = self._gds_data.pop(object_id, None)
             self.viewport.remove_object(object_id)
             self.component_tree.remove_object(object_id)
+            deleted_entries.append((removed_obj, gds_data))
             deleted = True
 
         if not deleted:
-            return
+            return ()
 
         self.property_panel.show_scene_summary(self.scene.count())
         self.statusBar().showMessage(status_message)
+        self._push_undo(
+            "Delete",
+            lambda entries=tuple(deleted_entries): self._restore_deleted_objects(
+                entries
+            ),
+        )
+        return tuple(deleted_entries)
+
+    def _delete_requested(self, target: object) -> None:
+        if isinstance(target, ComponentGroupInfo):
+            self._delete_objects(target.object_ids, f"Deleted cell {target.name}")
+            return
+        if isinstance(target, str):
+            self.delete_selected_object(target)
+
+    def delete_selected_object(self, object_id: str) -> None:
+        obj = self.scene.get(object_id)
+        if obj is None:
+            return
+        self._delete_objects((object_id,), f"Deleted {obj.name}")
 
     def _create_docks(self) -> None:
         self.left_dock = QDockWidget("Components", self)
@@ -228,6 +287,10 @@ class MainWindow(QMainWindow):
         file_menu.addMenu(export_as_menu)
 
         edit_menu = self.menuBar().addMenu("&Edit")
+        self._undo_action = edit_menu.addAction("Undo", self.undo)
+        self._undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        self._undo_action.setShortcutVisibleInContextMenu(True)
+        self._undo_action.setEnabled(False)
         edit_menu.addAction("Create Baseplate", self.create_baseplate)
         edit_menu.addAction("Delete", self.delete_selected)
         edit_menu.addSeparator()
@@ -319,7 +382,16 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            previous_state = self._capture_property_state(obj, field)
             self._apply_property(obj, field, value)
+            current_state = self._capture_property_state(obj, field)
+            if current_state != previous_state:
+                self._push_undo(
+                    "Edit Property",
+                    lambda object_id=obj.id, field=field, state=previous_state: (
+                        self._restore_property_state(object_id, field, state)
+                    ),
+                )
             self._sync_view_after_property(obj, field)
             self.component_tree.refresh_object(obj)
             self.component_tree.select_object(obj.id)
@@ -333,11 +405,44 @@ class MainWindow(QMainWindow):
         if obj is None:
             return
 
+        previous_visible = obj.visible
         obj.visible = visible
         self.viewport.update_actor(obj)
         self.component_tree.refresh_object(obj)
+        if previous_visible != visible:
+            self._push_undo(
+                "Toggle Visibility",
+                lambda object_id=obj.id, state=previous_visible: self._set_visibility(
+                    object_id, state
+                ),
+            )
         state = "shown" if visible else "hidden"
         self.statusBar().showMessage(f"{obj.name} {state}")
+
+    def _set_group_visibility(self, group: object, visible: bool) -> None:
+        if not isinstance(group, ComponentGroupInfo):
+            return
+        previous_states: dict[str, bool] = {}
+        for object_id in group.object_ids:
+            obj = self.scene.get(object_id)
+            if obj is None:
+                continue
+            previous_states[object_id] = obj.visible
+            obj.visible = visible
+            self.viewport.update_actor(obj)
+            self.component_tree.refresh_object(obj)
+        changed_states = tuple(
+            (object_id, previous_visible)
+            for object_id, previous_visible in previous_states.items()
+            if previous_visible != visible
+        )
+        if changed_states:
+            self._push_undo(
+                "Toggle Cell Visibility",
+                lambda states=changed_states: self._restore_visibility_states(states),
+            )
+        state = "shown" if visible else "hidden"
+        self.statusBar().showMessage(f"Cell {group.name} {state}")
 
     def _reset_property(self, object_id: str, field: str) -> None:
         obj = self.scene.get(object_id)
@@ -348,7 +453,16 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            previous_state = self._capture_property_state(obj, field)
             self._apply_property(obj, field, obj.defaults[field])
+            current_state = self._capture_property_state(obj, field)
+            if current_state != previous_state:
+                self._push_undo(
+                    "Reset Property",
+                    lambda object_id=obj.id, field=field, state=previous_state: (
+                        self._restore_property_state(object_id, field, state)
+                    ),
+                )
             self._sync_view_after_property(obj, field)
             self.component_tree.refresh_object(obj)
             self.property_panel.set_object(obj)
@@ -440,6 +554,135 @@ class MainWindow(QMainWindow):
         if field in {"color", "brightness", "opacity", "z_min", "z_max", "visible"}:
             self.viewport.update_actor(obj)
             self.viewport.highlight_object(obj.id)
+
+    def _capture_property_state(
+        self, obj: SceneObject, field: str
+    ) -> dict[str, object]:
+        if field == "name":
+            return {"name": obj.name}
+        if field == "visible":
+            return {"visible": obj.visible}
+        if field == "color":
+            return {"color": obj.color}
+        if field == "brightness":
+            return {"brightness": obj.brightness}
+        if field == "opacity":
+            return {"opacity": obj.opacity}
+        if field in {"z_min", "z_max"}:
+            return {"z_min": obj.z_min, "z_max": obj.z_max}
+        if isinstance(obj, BaseplateObject) and field in {
+            "min_x",
+            "min_y",
+            "max_x",
+            "max_y",
+        }:
+            return {
+                "bounds": Bounds2D(
+                    min_x=obj.bounds.min_x,
+                    min_y=obj.bounds.min_y,
+                    max_x=obj.bounds.max_x,
+                    max_y=obj.bounds.max_y,
+                )
+            }
+        raise ValueError(f"unsupported property: {field}")
+
+    def _restore_property_state(
+        self, object_id: str, field: str, state: dict[str, object]
+    ) -> None:
+        obj = self.scene.get(object_id)
+        if obj is None:
+            return
+
+        if "name" in state:
+            obj.name = str(state["name"])
+        elif "visible" in state:
+            obj.visible = bool(state["visible"])
+        elif "color" in state:
+            obj.color = str(state["color"])
+        elif "brightness" in state:
+            obj.brightness = float(state["brightness"])
+        elif "opacity" in state:
+            obj.opacity = float(state["opacity"])
+        elif "z_min" in state and "z_max" in state:
+            obj.z_min = float(state["z_min"])
+            obj.z_max = float(state["z_max"])
+        elif "bounds" in state and isinstance(obj, BaseplateObject):
+            bounds = state["bounds"]
+            if not isinstance(bounds, Bounds2D):
+                raise ValueError("invalid bounds state")
+            obj.bounds = bounds
+        else:
+            raise ValueError(f"unsupported property: {field}")
+
+        self._sync_view_after_property(obj, field)
+        self.component_tree.refresh_object(obj)
+        self.property_panel.set_object(obj)
+        self.component_tree.select_object(obj.id)
+
+    def _restore_visibility_states(self, states: tuple[tuple[str, bool], ...]) -> None:
+        for object_id, visible in states:
+            obj = self.scene.get(object_id)
+            if obj is None:
+                continue
+            obj.visible = visible
+            self.viewport.update_actor(obj)
+            self.component_tree.refresh_object(obj)
+
+    def _restore_deleted_objects(
+        self, entries: tuple[tuple[SceneObject, GdsLayerData | None], ...]
+    ) -> None:
+        if not entries:
+            return
+
+        should_reset_camera = self.scene.count() == 0
+        for obj, gds_data in entries:
+            self.scene.add(obj)
+            if isinstance(obj, GdsLayerObject):
+                if gds_data is None:
+                    raise ValueError("missing GDS data for restored object")
+                self._gds_data[obj.id] = gds_data
+                self.viewport.add_or_update(
+                    obj, gds_data.polygons, _gds_cache_key(gds_data)
+                )
+            else:
+                self.viewport.add_or_update(obj)
+            self.component_tree.add_object(obj)
+
+        if should_reset_camera:
+            self.viewport.reset_camera()
+        self.property_panel.show_scene_summary(self.scene.count())
+
+    def undo(self) -> None:
+        if not self._undo_stack:
+            return
+
+        label, callback = self._undo_stack.pop()
+        self._update_undo_action()
+        try:
+            self._is_restoring = True
+            callback()
+            self.statusBar().showMessage(f"Undid {label}")
+        except Exception as exc:
+            self._show_error("Undo failed", str(exc))
+        finally:
+            self._is_restoring = False
+
+    def _push_undo(self, label: str, callback: Callable[[], None]) -> None:
+        if self._is_restoring:
+            return
+
+        self._undo_stack.append((label, callback))
+        if len(self._undo_stack) > UNDO_STACK_COUNT_MAX:
+            del self._undo_stack[: len(self._undo_stack) - UNDO_STACK_COUNT_MAX]
+        self._update_undo_action()
+
+    def _clear_undo_history(self) -> None:
+        self._undo_stack.clear()
+        self._update_undo_action()
+
+    def _update_undo_action(self) -> None:
+        if self._undo_action is not None:
+            self._undo_action.setEnabled(bool(self._undo_stack))
 
     def _default_baseplate_bounds(self) -> Bounds2D:
         current = self.component_tree.currentItem()

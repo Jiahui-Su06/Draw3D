@@ -9,6 +9,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
+    QMenu,
     QTreeWidget,
     QTreeWidgetItem,
 )
@@ -40,6 +41,8 @@ class ComponentGroupInfo:
 class ComponentTree(QTreeWidget):
     object_selected = Signal(object)
     visibility_changed = Signal(str, bool)
+    group_visibility_changed = Signal(object, bool)
+    delete_requested = Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -64,6 +67,8 @@ class ComponentTree(QTreeWidget):
 
         self.currentItemChanged.connect(self._emit_current_object)
         self.itemClicked.connect(self._handle_item_clicked)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
 
     def add_object(self, obj: SceneObject) -> None:
         item = QTreeWidgetItem([self._label_for(obj), ""])
@@ -146,6 +151,37 @@ class ComponentTree(QTreeWidget):
             return
         current = bool(item.data(1, VISIBLE_ROLE))
         self.visibility_changed.emit(object_id, not current)
+
+    def _show_context_menu(self, position) -> None:
+        item = self.itemAt(position)
+        if item is None:
+            return
+
+        menu = QMenu(self)
+        object_id = item.data(0, OBJECT_ID_ROLE)
+        group = self._group_info(item)
+
+        if isinstance(object_id, str):
+            visible = bool(item.data(1, VISIBLE_ROLE))
+            label = "Show" if not visible else "Hide"
+            menu.addAction(
+                label,
+                lambda: self.visibility_changed.emit(object_id, not visible),
+            )
+            menu.addAction("Delete", lambda: self.delete_requested.emit(object_id))
+        elif group is not None:
+            visible = self._group_has_visible_child(item)
+            label = "Show Cell" if not visible else "Hide Cell"
+            menu.addAction(
+                label,
+                lambda: self.group_visibility_changed.emit(group, not visible),
+            )
+            menu.addAction("Delete Cell", lambda: self.delete_requested.emit(group))
+
+        if not menu.actions():
+            return
+
+        menu.exec(self.viewport().mapToGlobal(position))
 
     def _find_item(self, object_id: str) -> QTreeWidgetItem | None:
         pending = self._top_level_items()
@@ -235,3 +271,10 @@ class ComponentTree(QTreeWidget):
                 object_ids=tuple(object_ids),
             )
         return None
+
+    def _group_has_visible_child(self, item: QTreeWidgetItem) -> bool:
+        for index in range(item.childCount()):
+            child = item.child(index)
+            if bool(child.data(1, VISIBLE_ROLE)):
+                return True
+        return False

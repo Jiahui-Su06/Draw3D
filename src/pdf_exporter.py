@@ -27,7 +27,9 @@ def export_scene_pdf(
         _build_pdf(path, screenshot_path, objects)
 
 
-def _build_pdf(file_path: Path, screenshot_path: Path, objects: list[SceneObject]) -> None:
+def _build_pdf(
+    file_path: Path, screenshot_path: Path, objects: list[SceneObject]
+) -> None:
     doc = SimpleDocTemplate(
         str(file_path),
         pagesize=A4,
@@ -54,16 +56,18 @@ def _build_pdf(file_path: Path, screenshot_path: Path, objects: list[SceneObject
 
 
 def _make_table(objects: list[SceneObject]) -> Table:
-    rows = [[
-        "Name",
-        "Kind",
-        "Cell",
-        "Layer",
-        "Datatype",
-        "X Bounds",
-        "Y Bounds",
-        "Z Bounds",
-    ]]
+    rows = [
+        [
+            "Name",
+            "Kind",
+            "Cell",
+            "Layer",
+            "Datatype",
+            "X Bounds",
+            "Y Bounds",
+            "Z Bounds",
+        ]
+    ]
 
     for obj in objects:
         if isinstance(obj, GdsLayerObject):
@@ -104,10 +108,15 @@ def _make_table(objects: list[SceneObject]) -> Table:
                 ("FONTSIZE", (0, 0), (-1, -1), 7),
                 ("LEADING", (0, 0), (-1, -1), 8),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [
-                    colors.white,
-                    colors.HexColor("#f5f7fa"),
-                ]),
+                (
+                    "ROWBACKGROUNDS",
+                    (0, 1),
+                    (-1, -1),
+                    [
+                        colors.white,
+                        colors.HexColor("#f5f7fa"),
+                    ],
+                ),
             ]
         )
     )

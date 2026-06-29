@@ -6,7 +6,7 @@ import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from objects import BaseplateObject, Bounds2D, GdsLayerObject, SceneObject
+from objects import BaseplateObject, GdsLayerObject, SceneObject
 
 
 ARCHIVE_FORMAT_VERSION = 1
@@ -36,7 +36,9 @@ def write_project_archive(
         _write_gds_sources(zf, gds_source_paths)
 
 
-def read_project_archive(file_path: Path) -> tuple[list[ProjectArchiveObject], dict[str, bytes]]:
+def read_project_archive(
+    file_path: Path,
+) -> tuple[list[ProjectArchiveObject], dict[str, bytes]]:
     path = file_path.expanduser().resolve()
     if path.suffix.lower() != ".gds3d":
         raise ValueError("selected file is not a .gds3d file")
