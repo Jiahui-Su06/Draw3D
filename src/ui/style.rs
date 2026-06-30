@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use eframe::egui::{self, FontId, TextStyle};
 
 use super::super::{LUCIDE_FONT_FAMILY, clamp_ui_font_size};
@@ -10,18 +12,6 @@ pub(in crate::app) fn configure_light_theme(ctx: &egui::Context) {
 pub(in crate::app) fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
-        "noto_sans".to_owned(),
-        egui::FontData::from_static(include_bytes!("../../assets/fonts/NotoSans-Regular.ttf"))
-            .into(),
-    );
-    fonts.font_data.insert(
-        "noto_sans_cjk".to_owned(),
-        egui::FontData::from_static(include_bytes!(
-            "../../assets/fonts/NotoSansCJKsc-Regular.otf"
-        ))
-        .into(),
-    );
-    fonts.font_data.insert(
         "lucide".to_owned(),
         egui::FontData::from_static(lucide_icons::LUCIDE_FONT_BYTES).into(),
     );
@@ -30,20 +20,107 @@ pub(in crate::app) fn configure_fonts(ctx: &egui::Context) {
         vec!["lucide".to_owned()],
     );
 
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+    if let Some(system_font) = load_font(system_ui_font_candidates()) {
         fonts
-            .families
-            .entry(family.clone())
-            .or_default()
-            .insert(0, "noto_sans".to_owned());
-        fonts
-            .families
-            .entry(family)
-            .or_default()
-            .push("noto_sans_cjk".to_owned());
+            .font_data
+            .insert("system_ui".to_owned(), system_font.into());
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .insert(0, "system_ui".to_owned());
+        }
     }
-
     ctx.set_fonts(fonts);
+}
+
+fn load_font(paths: Vec<PathBuf>) -> Option<egui::FontData> {
+    for path in paths {
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
+        return Some(egui::FontData::from_owned(data));
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn system_ui_font_candidates() -> Vec<PathBuf> {
+    let font_dir = std::env::var_os("WINDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("C:\\Windows"))
+        .join("Fonts");
+    [
+        "msyh.ttc",
+        "msyhl.ttc",
+        "msyhbd.ttc",
+        "simhei.ttf",
+        "simsun.ttc",
+    ]
+    .into_iter()
+    .map(|file_name| font_dir.join(file_name))
+    .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn system_ui_font_candidates() -> Vec<PathBuf> {
+    path_candidates([
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+    ])
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn system_ui_font_candidates() -> Vec<PathBuf> {
+    let mut candidates = fontconfig_candidates(["sans:lang=zh-cn", "Noto Sans CJK SC"]);
+    candidates.extend(path_candidates([
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    ]));
+    candidates
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn system_ui_font_candidates() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+fn path_candidates(paths: impl IntoIterator<Item = &'static str>) -> Vec<PathBuf> {
+    paths.into_iter().map(PathBuf::from).collect()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn fontconfig_candidates(font_names: impl IntoIterator<Item = &'static str>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for font_name in font_names {
+        let Ok(output) = std::process::Command::new("fc-match")
+            .args(["-f", "%{file}", font_name])
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if path.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(path);
+        if is_new_path(&candidates, &path) {
+            candidates.push(path);
+        }
+    }
+    candidates
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn is_new_path(paths: &[PathBuf], path: &Path) -> bool {
+    !paths.iter().any(|candidate| candidate == path)
 }
 
 pub(in crate::app) fn configure_industrial_style(ctx: &egui::Context, ui_font_size: f32) {
