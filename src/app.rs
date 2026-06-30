@@ -22,12 +22,19 @@ const UNDO_STACK_MAX: usize = 100;
 const LUCIDE_FONT_FAMILY: &str = "lucide";
 const PROPERTY_LABEL_WIDTH: f32 = 88.0;
 const PROPERTY_NUMBER_WIDTH: f32 = 58.0;
-const PROPERTY_ROW_HEIGHT: f32 = 22.0;
+const PROPERTY_ROW_HEIGHT_MIN: f32 = 22.0;
 const PROPERTY_VALUE_MIN_WIDTH: f32 = 64.0;
 const PROPERTY_RESET_WIDTH: f32 = 20.0;
 const MENU_POPUP_MIN_WIDTH: f32 = 112.0;
+const SETTINGS_POPUP_MIN_WIDTH: f32 = 190.0;
+const SETTINGS_COLUMN_GAP: f32 = 8.0;
+const SETTINGS_CONTROL_WIDTH: f32 = 112.0;
 const SETTINGS_DIR_NAME: &str = "GDS3D";
 const SETTINGS_FILE_NAME: &str = "settings.json";
+const UI_FONT_SIZE_DEFAULT: f32 = 14.0;
+const UI_FONT_SIZE_MIN: f32 = 12.0;
+const UI_FONT_SIZE_MAX: f32 = 20.0;
+const STARTUP_WINDOW_Y_NUDGE: f32 = 24.0;
 
 pub struct Gds3dApp {
     scene: Scene,
@@ -45,6 +52,8 @@ pub struct Gds3dApp {
     settings: AppSettings,
     archive_temp_dir: Option<PathBuf>,
     property_edit: PropertyEditState,
+    startup_theme_pending: bool,
+    startup_window_nudge_pending: bool,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -53,6 +62,8 @@ struct AppSettings {
     show_axes: bool,
     left_panel_width: f32,
     right_panel_width: f32,
+    #[serde(default = "default_ui_font_size")]
+    ui_font_size: f32,
 }
 
 impl Default for AppSettings {
@@ -62,6 +73,7 @@ impl Default for AppSettings {
             show_axes: true,
             left_panel_width: 240.0,
             right_panel_width: 280.0,
+            ui_font_size: UI_FONT_SIZE_DEFAULT,
         }
     }
 }
@@ -148,9 +160,10 @@ impl Locale {
 
 impl Gds3dApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        configure_light_theme(&cc.egui_ctx);
         configure_fonts(&cc.egui_ctx);
-        configure_industrial_style(&cc.egui_ctx);
         let settings = load_app_settings();
+        configure_industrial_style(&cc.egui_ctx, settings.ui_font_size);
         let locale = Locale::from_code(&settings.locale);
         rust_i18n::set_locale(locale.code());
         let mut viewport = ViewportState::new(cc.wgpu_render_state.as_ref());
@@ -171,6 +184,8 @@ impl Gds3dApp {
             settings,
             archive_temp_dir: None,
             property_edit: PropertyEditState::default(),
+            startup_theme_pending: true,
+            startup_window_nudge_pending: true,
         }
     }
 
@@ -392,10 +407,41 @@ impl Gds3dApp {
             self.scene.touch();
         }
     }
+
+    fn nudge_startup_window(&mut self, ctx: &egui::Context) {
+        if !self.startup_window_nudge_pending {
+            return;
+        }
+
+        let Some(position) = ctx.input(|input| {
+            let outer_rect = input.viewport().outer_rect?;
+            Some(egui::pos2(
+                outer_rect.min.x,
+                (outer_rect.min.y - STARTUP_WINDOW_Y_NUDGE).max(0.0),
+            ))
+        }) else {
+            ctx.request_repaint();
+            return;
+        };
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+        self.startup_window_nudge_pending = false;
+    }
+
+    fn apply_startup_theme(&mut self, ctx: &egui::Context) {
+        if !self.startup_theme_pending {
+            return;
+        }
+
+        configure_light_theme(ctx);
+        self.startup_theme_pending = false;
+    }
 }
 
 impl eframe::App for Gds3dApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.apply_startup_theme(ui.ctx());
+        self.nudge_startup_window(ui.ctx());
         self.show_menu(ui);
         self.show_status_bar(ui);
         self.show_left_panel(ui);
@@ -471,30 +517,88 @@ impl Gds3dApp {
                 });
 
                 ui.menu_button(t!("menu.settings").as_ref(), |ui| {
-                    ui.set_min_width(MENU_POPUP_MIN_WIDTH);
-                    ui.menu_button(t!("menu.language").as_ref(), |ui| {
-                        ui.set_min_width(MENU_POPUP_MIN_WIDTH);
-                        for locale in [Locale::English, Locale::SimplifiedChinese] {
-                            if ui
-                                .radio_value(&mut self.locale, locale, locale.label())
-                                .clicked()
-                            {
-                                rust_i18n::set_locale(locale.code());
-                                self.settings.locale = locale.code().to_owned();
-                                save_app_settings(&self.settings);
-                                self.status = t!("status.language_changed").to_string();
-                            }
+                    let language_label = t!("menu.language");
+                    let font_size_label = t!("setting.ui_font_size");
+                    let show_axes_label = t!("setting.show_axes");
+                    let label_width = settings_label_width(
+                        ui,
+                        [
+                            language_label.as_ref(),
+                            font_size_label.as_ref(),
+                            show_axes_label.as_ref(),
+                        ],
+                    );
+                    let popup_width = (label_width + SETTINGS_COLUMN_GAP + SETTINGS_CONTROL_WIDTH)
+                        .max(SETTINGS_POPUP_MIN_WIDTH);
+                    let control_width = popup_width - label_width - SETTINGS_COLUMN_GAP;
+                    let row_height = ui.spacing().interact_size.y;
+                    ui.set_width(popup_width);
+                    ui.spacing_mut().item_spacing.y = 6.0;
+
+                    ui.horizontal(|ui| {
+                        settings_label(ui, language_label.as_ref(), label_width, row_height);
+                        ui.add_space((SETTINGS_COLUMN_GAP - ui.spacing().item_spacing.x).max(0.0));
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(control_width, row_height),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.menu_button(self.locale.label(), |ui| {
+                                    ui.set_min_width(MENU_POPUP_MIN_WIDTH);
+                                    for locale in [Locale::English, Locale::SimplifiedChinese] {
+                                        if ui
+                                            .radio_value(&mut self.locale, locale, locale.label())
+                                            .clicked()
+                                        {
+                                            rust_i18n::set_locale(locale.code());
+                                            self.settings.locale = locale.code().to_owned();
+                                            save_app_settings(&self.settings);
+                                            self.status = t!("status.language_changed").to_string();
+                                        }
+                                    }
+                                });
+                            },
+                        );
+                    });
+
+                    ui.horizontal(|ui| {
+                        settings_label(ui, font_size_label.as_ref(), label_width, row_height);
+                        ui.add_space((SETTINGS_COLUMN_GAP - ui.spacing().item_spacing.x).max(0.0));
+                        let mut ui_font_size = self.settings.ui_font_size;
+                        let font_response = ui.add_sized(
+                            [control_width, row_height],
+                            egui::Slider::new(
+                                &mut ui_font_size,
+                                UI_FONT_SIZE_MIN..=UI_FONT_SIZE_MAX,
+                            )
+                            .show_value(true)
+                            .step_by(1.0),
+                        );
+                        if font_response.changed() {
+                            self.settings.ui_font_size = clamp_ui_font_size(ui_font_size);
+                        }
+                        let should_apply_font_size = font_response.drag_stopped()
+                            || font_response.changed() && !font_response.dragged();
+                        if should_apply_font_size {
+                            configure_industrial_style(ui.ctx(), self.settings.ui_font_size);
+                            save_app_settings(&self.settings);
                         }
                     });
-                    ui.separator();
-                    let response = ui.checkbox(
-                        &mut self.viewport.show_axes,
-                        t!("setting.show_axes").as_ref(),
-                    );
-                    if response.changed() {
-                        self.settings.show_axes = self.viewport.show_axes;
-                        save_app_settings(&self.settings);
-                    }
+
+                    ui.horizontal(|ui| {
+                        settings_label(ui, show_axes_label.as_ref(), label_width, row_height);
+                        ui.add_space((SETTINGS_COLUMN_GAP - ui.spacing().item_spacing.x).max(0.0));
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(control_width, row_height),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                let response = ui.checkbox(&mut self.viewport.show_axes, "");
+                                if response.changed() {
+                                    self.settings.show_axes = self.viewport.show_axes;
+                                    save_app_settings(&self.settings);
+                                }
+                            },
+                        );
+                    });
                 });
             });
         });
@@ -884,6 +988,31 @@ fn viewport_object(obj: &SceneObject, previous: Option<&ViewportObject>) -> View
     }
 }
 
+fn settings_label_width<'a>(ui: &egui::Ui, labels: impl IntoIterator<Item = &'a str>) -> f32 {
+    let font_size = TextStyle::Body.resolve(ui.style()).size;
+    let max_chars = labels
+        .into_iter()
+        .map(|label| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    (max_chars as f32 * font_size * 0.78).clamp(42.0, 96.0)
+}
+
+fn settings_label(ui: &mut egui::Ui, text: &str, width: f32, height: f32) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, height),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.label(text);
+        },
+    );
+}
+
+fn configure_light_theme(ctx: &egui::Context) {
+    ctx.set_theme(egui::Theme::Light);
+    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Light));
+}
+
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
@@ -920,26 +1049,34 @@ fn configure_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-fn configure_industrial_style(ctx: &egui::Context) {
+fn configure_industrial_style(ctx: &egui::Context, ui_font_size: f32) {
+    let ui_font_size = clamp_ui_font_size(ui_font_size);
     let mut style = (*ctx.style_of(egui::Theme::Light)).clone();
     style.spacing.item_spacing = egui::vec2(6.0, 3.0);
     style.spacing.button_padding = egui::vec2(6.0, 2.0);
     style.spacing.indent = 14.0;
     style.text_styles.insert(
         TextStyle::Heading,
-        FontId::new(16.0, egui::FontFamily::Proportional),
+        FontId::new(ui_font_size + 3.0, egui::FontFamily::Proportional),
     );
     style.text_styles.insert(
         TextStyle::Body,
-        FontId::new(13.0, egui::FontFamily::Proportional),
+        FontId::new(ui_font_size, egui::FontFamily::Proportional),
     );
     style.text_styles.insert(
         TextStyle::Button,
-        FontId::new(13.0, egui::FontFamily::Proportional),
+        FontId::new(ui_font_size, egui::FontFamily::Proportional),
     );
     style.text_styles.insert(
         TextStyle::Small,
-        FontId::new(11.0, egui::FontFamily::Proportional),
+        FontId::new(
+            (ui_font_size - 2.0).max(10.0),
+            egui::FontFamily::Proportional,
+        ),
+    );
+    style.text_styles.insert(
+        TextStyle::Monospace,
+        FontId::new(ui_font_size, egui::FontFamily::Monospace),
     );
     style.visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(242, 245, 248);
     style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(214, 221, 229);
@@ -952,6 +1089,18 @@ fn configure_industrial_style(ctx: &egui::Context) {
     style.visuals.indent_has_left_vline = false;
     ctx.set_style_of(egui::Theme::Light, style.clone());
     ctx.set_style_of(egui::Theme::Dark, style);
+}
+
+fn default_ui_font_size() -> f32 {
+    UI_FONT_SIZE_DEFAULT
+}
+
+fn clamp_ui_font_size(ui_font_size: f32) -> f32 {
+    if ui_font_size.is_finite() {
+        ui_font_size.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX)
+    } else {
+        UI_FONT_SIZE_DEFAULT
+    }
 }
 
 struct TreeRowResponse {
@@ -983,7 +1132,9 @@ fn tree_row(
     expanded: Option<bool>,
     tooltip: Option<String>,
 ) -> TreeRowResponse {
-    let row_height = 24.0;
+    let font_id = TextStyle::Body.resolve(ui.style());
+    let font_size = font_id.size;
+    let row_height = (font_size + 11.0).max(24.0);
     let (rect, row) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), row_height), Sense::click());
     let fill = if selected {
@@ -1045,12 +1196,12 @@ fn tree_row(
         Pos2::new(label_left, rect.top()),
         Pos2::new(label_right.max(label_left), rect.bottom()),
     );
-    let label = elide_text(text, label_rect.width(), 13.0);
+    let label = elide_text(text, label_rect.width(), font_size);
     ui.painter().with_clip_rect(label_rect).text(
         Pos2::new(label_left, center_y),
         egui::Align2::LEFT_CENTER,
         label,
-        FontId::new(13.0, egui::FontFamily::Proportional),
+        font_id,
         text_color,
     );
 
@@ -1198,11 +1349,12 @@ fn edit_text_row(
     default_value: &str,
 ) {
     let value_width = property_value_width(ui);
+    let row_height = property_row_height(ui);
     ui.horizontal(|ui| {
         property_label(ui, RichText::new(label));
         let field_width = value_width - reset_button_width(ui);
         let response = ui.add_sized(
-            [field_width, PROPERTY_ROW_HEIGHT],
+            [field_width, row_height],
             egui::TextEdit::singleline(edit_value),
         );
         let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -1296,6 +1448,7 @@ fn edit_float_row(
     options: FloatRowOptions,
 ) {
     let value_width = property_value_width(ui);
+    let row_height = property_row_height(ui);
     ui.horizontal(|ui| {
         property_label(ui, RichText::new(label));
         let field_width = if options.default_value.is_some() {
@@ -1309,7 +1462,7 @@ fn edit_float_row(
         if let Some(decimals) = options.decimals {
             drag_value = drag_value.max_decimals(decimals);
         }
-        let response = ui.add_sized([field_width, PROPERTY_ROW_HEIGHT], drag_value);
+        let response = ui.add_sized([field_width, row_height], drag_value);
         if response.changed() {
             *target = *edit_value;
         }
@@ -1354,7 +1507,7 @@ impl FloatRowOptions {
 
 fn property_label(ui: &mut egui::Ui, text: RichText) {
     ui.allocate_ui_with_layout(
-        egui::vec2(PROPERTY_LABEL_WIDTH, PROPERTY_ROW_HEIGHT),
+        egui::vec2(PROPERTY_LABEL_WIDTH, property_row_height(ui)),
         egui::Layout::right_to_left(egui::Align::Center),
         |ui| {
             ui.label(text);
@@ -1371,9 +1524,14 @@ fn reset_button_width(ui: &egui::Ui) -> f32 {
     PROPERTY_RESET_WIDTH + ui.spacing().item_spacing.x
 }
 
+fn property_row_height(ui: &egui::Ui) -> f32 {
+    (TextStyle::Body.resolve(ui.style()).size + 8.0).max(PROPERTY_ROW_HEIGHT_MIN)
+}
+
 fn reset_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+    let row_height = property_row_height(ui);
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(PROPERTY_RESET_WIDTH, PROPERTY_ROW_HEIGHT),
+        egui::vec2(PROPERTY_RESET_WIDTH, row_height),
         if enabled {
             Sense::click()
         } else {
@@ -1416,8 +1574,8 @@ fn format_hex_rgb(rgb: [u8; 3]) -> String {
 }
 
 fn readonly_field(ui: &mut egui::Ui, value: &str, width: f32) {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, PROPERTY_ROW_HEIGHT), Sense::hover());
+    let row_height = property_row_height(ui);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, row_height), Sense::hover());
     let fill = ui.visuals().widgets.noninteractive.bg_fill;
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(2), fill);
@@ -1448,14 +1606,15 @@ fn slider_field(
 ) -> SliderFieldResponse {
     let spacing = ui.spacing().item_spacing.x;
     let slider_width = (width - PROPERTY_NUMBER_WIDTH - spacing).max(48.0);
+    let row_height = property_row_height(ui);
     let slider_response = ui.add_sized(
-        [slider_width, PROPERTY_ROW_HEIGHT],
+        [slider_width, row_height],
         egui::Slider::new(edit_value, min..=max)
             .show_value(false)
             .step_by(step),
     );
     let number_response = ui.add_sized(
-        [PROPERTY_NUMBER_WIDTH, PROPERTY_ROW_HEIGHT],
+        [PROPERTY_NUMBER_WIDTH, row_height],
         egui::DragValue::new(target).speed(step).range(min..=max),
     );
     SliderFieldResponse {
@@ -1527,7 +1686,16 @@ fn load_app_settings() -> AppSettings {
     let Ok(data) = fs::read_to_string(path) else {
         return AppSettings::default();
     };
-    serde_json::from_str(&data).unwrap_or_default()
+    serde_json::from_str(&data)
+        .map(sanitize_app_settings)
+        .unwrap_or_default()
+}
+
+fn sanitize_app_settings(mut settings: AppSettings) -> AppSettings {
+    settings.left_panel_width = settings.left_panel_width.clamp(160.0, 520.0);
+    settings.right_panel_width = settings.right_panel_width.clamp(180.0, 560.0);
+    settings.ui_font_size = clamp_ui_font_size(settings.ui_font_size);
+    settings
 }
 
 fn save_app_settings(settings: &AppSettings) {
@@ -1572,6 +1740,7 @@ fn config_dir() -> Option<PathBuf> {
     home_dir().map(|home| home.join(".config"))
 }
 
+#[cfg(not(target_os = "windows"))]
 fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
