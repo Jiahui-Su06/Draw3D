@@ -609,7 +609,9 @@ fn restore_gds_layer(
 
     restored.display = display_from_payload(payload)?;
     restored.display.defaults = default_display(&restored.display);
-    restored.file_path = archive_path.to_path_buf();
+    restored.id = optional_string_field(payload, "object_id").unwrap_or_else(model::new_object_id);
+    restored.file_path =
+        optional_path_field(payload, "display_path").unwrap_or_else(|| archive_path.to_path_buf());
     restored.source_path = source_path.clone();
     restored.source_key = source_key;
     Ok(SceneObject::GdsLayer(restored))
@@ -622,7 +624,7 @@ fn restore_baseplate(archive_obj: &ArchiveObject) -> anyhow::Result<SceneObject>
         .ok_or_else(|| anyhow::anyhow!("invalid baseplate payload"))?;
     let bounds = bounds_from_payload(payload)?;
     Ok(SceneObject::Baseplate(BaseplateObject {
-        id: model::new_object_id(),
+        id: optional_string_field(payload, "object_id").unwrap_or_else(model::new_object_id),
         display: {
             let mut display = display_from_payload(payload)?;
             display.defaults = default_display(&display);
@@ -714,6 +716,25 @@ fn string_field(
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| anyhow::anyhow!("missing string field: {field}"))
+}
+
+fn optional_string_field(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Option<String> {
+    payload
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn optional_path_field(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Option<PathBuf> {
+    optional_string_field(payload, field)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn bool_field(

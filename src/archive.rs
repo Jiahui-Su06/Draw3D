@@ -131,6 +131,7 @@ fn serialize_object(obj: &SceneObject) -> Value {
     let mut payload = Map::new();
     match obj {
         SceneObject::GdsLayer(layer) => {
+            payload.insert("object_id".to_owned(), Value::from(layer.id.clone()));
             payload.insert("name".to_owned(), Value::from(layer.display.name.clone()));
             payload.insert(
                 "source_key".to_owned(),
@@ -163,6 +164,7 @@ fn serialize_object(obj: &SceneObject) -> Value {
             archive_object("gds_layer", payload)
         }
         SceneObject::Baseplate(baseplate) => {
+            payload.insert("object_id".to_owned(), Value::from(baseplate.id.clone()));
             payload.insert(
                 "name".to_owned(),
                 Value::from(baseplate.display.name.clone()),
@@ -519,6 +521,17 @@ mod tests {
         write_archive(&archive_path, &[obj]).expect("write archive");
         let (objects, sources) = read_archive(&archive_path).expect("read archive");
         assert_eq!(objects.len(), 1);
+        let payload = objects[0].payload.as_object().expect("object payload");
+        assert_eq!(
+            payload.get("object_id").and_then(serde_json::Value::as_str),
+            Some("00000000000000000000000000000001")
+        );
+        assert_eq!(
+            payload
+                .get("display_path")
+                .and_then(serde_json::Value::as_str),
+            Some("models/AWG.gds")
+        );
         assert_eq!(sources.len(), 1);
         assert!(sources.values().next().is_some_and(|data| !data.is_empty()));
         fs::remove_dir_all(&temp_dir).expect("remove temp dir");
