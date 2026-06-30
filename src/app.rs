@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, RichText, Sense, TextStyle, Vec2};
 use gds3d_viewport::{
-    self as viewport, Bounds2d as ViewportBounds2d, ViewportObject, ViewportScene, ViewportState,
+    self as viewport, Bounds2d as ViewportBounds2d, Polygon2d as ViewportPolygon2d, ViewportObject,
+    ViewportScene, ViewportState,
 };
 use lucide_icons::Icon;
 use rust_i18n::t;
@@ -20,6 +22,7 @@ pub struct Gds3dApp {
     selection: Selection,
     collapsed_cells: HashSet<CellKey>,
     viewport: ViewportState,
+    viewport_scene_cache: ViewportSceneCache,
     undo_stack: Vec<UndoCommand>,
     status: String,
     export_settings: ExportSettings,
@@ -33,8 +36,14 @@ pub struct Gds3dApp {
 enum UndoCommand {
     AddObjects(Vec<String>),
     DeleteObjects(Vec<SceneObject>),
-    ReplaceObject(SceneObject),
+    ReplaceObject(Box<SceneObject>),
     SetGroupVisibility(Vec<(String, bool)>),
+}
+
+#[derive(Default)]
+struct ViewportSceneCache {
+    revision: Option<u64>,
+    objects: Vec<ViewportObject>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -68,6 +77,7 @@ impl Gds3dApp {
             selection: Selection::Scene,
             collapsed_cells: HashSet::new(),
             viewport: ViewportState::new(cc.wgpu_render_state.as_ref()),
+            viewport_scene_cache: ViewportSceneCache::default(),
             undo_stack: Vec::new(),
             status: t!("status.ready").to_string(),
             export_settings: ExportSettings::default(),
@@ -86,17 +96,35 @@ impl Gds3dApp {
             return;
         };
 
-        let obj = model::placeholder_gds_layer(path.clone());
-        let object_id = obj.id().to_owned();
-        if let Err(err) = self.scene.add(obj) {
-            self.status = t!("status.import_failed", error = err).to_string();
-            return;
-        }
+        let objects = match model::import_gds_layers(&path) {
+            Ok(objects) => objects,
+            Err(err) => {
+                self.status = t!("status.import_failed", error = err).to_string();
+                return;
+            }
+        };
 
-        self.selection = Selection::Object(object_id.clone());
-        self.push_undo(UndoCommand::AddObjects(vec![object_id]));
+        let mut object_ids = Vec::new();
+        for obj in objects {
+            let object_id = obj.id().to_owned();
+            if let Err(err) = self.scene.add(obj) {
+                self.status = t!("status.import_failed", error = err).to_string();
+                return;
+            }
+            object_ids.push(object_id);
+        }
+        if let Some(object_id) = object_ids.first() {
+            self.selection = Selection::Object(object_id.clone());
+        }
+        let imported_count = object_ids.len();
+        self.push_undo(UndoCommand::AddObjects(object_ids));
         self.viewport.reset_camera();
-        self.status = t!("status.import_placeholder", name = file_name(&path)).to_string();
+        self.status = t!(
+            "status.imported_gds",
+            name = file_name(&path),
+            count = imported_count
+        )
+        .to_string();
     }
 
     fn open_project(&mut self) {
@@ -110,6 +138,7 @@ impl Gds3dApp {
         match read_scene_json(&path) {
             Ok(scene) => {
                 self.scene = scene;
+                self.viewport_scene_cache = ViewportSceneCache::default();
                 self.selection = Selection::Scene;
                 self.undo_stack.clear();
                 self.viewport.reset_camera();
@@ -200,7 +229,7 @@ impl Gds3dApp {
             UndoCommand::ReplaceObject(previous) => {
                 let id = previous.id().to_owned();
                 if let Some(current) = self.scene.get_mut(&id) {
-                    *current = previous;
+                    *current = *previous;
                     self.scene.touch();
                     self.selection = Selection::Object(id);
                 }
@@ -254,7 +283,7 @@ impl Gds3dApp {
             return;
         };
         if after != &before {
-            self.push_undo(UndoCommand::ReplaceObject(before));
+            self.push_undo(UndoCommand::ReplaceObject(Box::new(before)));
             self.scene.touch();
         }
     }
@@ -268,7 +297,8 @@ impl eframe::App for Gds3dApp {
         self.show_right_panel(ui);
 
         egui::CentralPanel::default_margins().show(ui, |ui| {
-            let viewport_scene = viewport_scene(&self.scene, &self.selection);
+            let viewport_scene =
+                viewport_scene(&self.scene, &self.selection, &mut self.viewport_scene_cache);
             viewport::show_viewport(
                 ui,
                 &viewport_scene,
@@ -625,25 +655,56 @@ impl Gds3dApp {
     }
 }
 
-fn viewport_scene(scene: &Scene, selection: &Selection) -> ViewportScene {
+fn viewport_scene(
+    scene: &Scene,
+    selection: &Selection,
+    cache: &mut ViewportSceneCache,
+) -> ViewportScene {
+    let revision = scene.revision();
+    if cache.revision != Some(revision) {
+        let previous_objects = cache.objects.clone();
+        cache.objects = scene
+            .objects()
+            .map(|obj| {
+                let previous = previous_objects
+                    .iter()
+                    .find(|previous| previous.id == obj.id());
+                viewport_object(obj, previous)
+            })
+            .collect();
+        cache.revision = Some(revision);
+    }
+
     let selected_id = match selection {
         Selection::Object(id) => Some(id.clone()),
         Selection::Scene | Selection::Cell(_) => None,
     };
-    let objects = scene
-        .objects()
-        .filter(|obj| obj.is_visible())
-        .map(viewport_object)
-        .collect();
     ViewportScene {
-        objects,
+        revision,
+        objects: cache.objects.clone(),
         selected_id,
     }
 }
 
-fn viewport_object(obj: &SceneObject) -> ViewportObject {
+fn viewport_object(obj: &SceneObject, previous: Option<&ViewportObject>) -> ViewportObject {
     let bounds = obj.bounds();
     let display = obj.display();
+    let polygons = match obj {
+        SceneObject::GdsLayer(layer) => previous
+            .filter(|previous| !previous.polygons.is_empty())
+            .map(|previous| Arc::clone(&previous.polygons))
+            .unwrap_or_else(|| {
+                layer
+                    .polygons
+                    .iter()
+                    .map(|polygon| ViewportPolygon2d {
+                        points: polygon.points.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into()
+            }),
+        SceneObject::Baseplate(_) => Arc::from([]),
+    };
     ViewportObject {
         id: obj.id().to_owned(),
         bounds: ViewportBounds2d {
@@ -652,11 +713,13 @@ fn viewport_object(obj: &SceneObject) -> ViewportObject {
             max_x: bounds.max_x,
             max_y: bounds.max_y,
         },
+        visible: obj.is_visible(),
         color: display.color.clone(),
         brightness: display.brightness,
         opacity: display.opacity,
         z_min: display.z_min,
         z_max: display.z_max,
+        polygons,
     }
 }
 

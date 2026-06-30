@@ -1,5 +1,8 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
+use gdsii::parser::{Element, GdsEvent, GdsParser};
+use gdsii::types::GdsPoint;
 use indexmap::IndexMap;
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
@@ -11,6 +14,12 @@ pub struct Bounds2d {
     pub min_y: f32,
     pub max_x: f32,
     pub max_y: f32,
+}
+
+/// A single closed 2D polygon ring from a GDS boundary-like element.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Polygon2d {
+    pub points: Vec<[f32; 2]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -61,6 +70,8 @@ pub struct GdsLayerObject {
     pub layer: i32,
     pub datatype: i32,
     pub bounds: Bounds2d,
+    #[serde(default)]
+    pub polygons: Vec<Polygon2d>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -166,6 +177,10 @@ impl Scene {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn objects(&self) -> impl Iterator<Item = &SceneObject> {
         self.objects.values()
     }
@@ -243,28 +258,77 @@ pub fn new_object_id() -> String {
     Uuid::new_v4().simple().to_string()
 }
 
-pub fn placeholder_gds_layer(path: PathBuf) -> SceneObject {
-    let stem = path
+pub fn import_gds_layers(path: &Path) -> anyhow::Result<Vec<SceneObject>> {
+    let data = fs::read(path)?;
+    let mut current_cell = None::<String>;
+    let mut coordinate_scale = 1.0f32;
+    let mut layers = IndexMap::<LayerKey, LayerGeometry>::new();
+
+    for event in GdsParser::new(&data) {
+        match event? {
+            GdsEvent::LibraryBegin(library) => {
+                coordinate_scale = parse_coordinate_scale(library.db_in_user)?;
+            }
+            GdsEvent::StructureBegin(structure) => {
+                current_cell = Some(structure.name.to_owned());
+            }
+            GdsEvent::StructureEnd => {
+                current_cell = None;
+            }
+            GdsEvent::Element(Element::Boundary(boundary)) => {
+                let Some(cell_name) = current_cell.as_ref() else {
+                    continue;
+                };
+                add_layer_polygon(
+                    &mut layers,
+                    cell_name,
+                    boundary.layer,
+                    boundary.datatype,
+                    polygon_from_points(GdsPoint::iter_xy(boundary.xy), coordinate_scale),
+                );
+            }
+            GdsEvent::Element(Element::Box(box_)) => {
+                let Some(cell_name) = current_cell.as_ref() else {
+                    continue;
+                };
+                add_layer_polygon(
+                    &mut layers,
+                    cell_name,
+                    box_.layer,
+                    box_.boxtype,
+                    polygon_from_points(GdsPoint::iter_xy(box_.xy), coordinate_scale),
+                );
+            }
+            GdsEvent::Element(_) | GdsEvent::Property(_) | GdsEvent::LibraryEnd => {}
+        }
+    }
+
+    let source_key = path
         .file_stem()
         .and_then(|name| name.to_str())
         .unwrap_or("GDS")
         .to_owned();
-    SceneObject::GdsLayer(GdsLayerObject {
-        id: new_object_id(),
-        display: DisplayProperties::gds_layer("L1/0"),
-        file_path: path.clone(),
-        source_path: path.clone(),
-        source_key: stem.clone(),
-        cell_name: stem,
-        layer: 1,
-        datatype: 0,
-        bounds: Bounds2d {
-            min_x: -250.0,
-            min_y: -150.0,
-            max_x: 250.0,
-            max_y: 150.0,
-        },
-    })
+    let mut objects = Vec::new();
+    for (key, geometry) in layers {
+        objects.push(SceneObject::GdsLayer(GdsLayerObject {
+            id: new_object_id(),
+            display: DisplayProperties::gds_layer(format!("L{}/{}", key.layer, key.datatype)),
+            file_path: path.to_path_buf(),
+            source_path: path.to_path_buf(),
+            source_key: source_key.clone(),
+            cell_name: key.cell_name,
+            layer: key.layer,
+            datatype: key.datatype,
+            bounds: geometry.bounds,
+            polygons: geometry.polygons,
+        }));
+    }
+
+    if objects.is_empty() {
+        anyhow::bail!("no GDS boundary or box geometry found");
+    }
+
+    Ok(objects)
 }
 
 pub fn new_baseplate(name: impl Into<String>, bounds: Bounds2d) -> SceneObject {
@@ -273,4 +337,143 @@ pub fn new_baseplate(name: impl Into<String>, bounds: Bounds2d) -> SceneObject {
         display: DisplayProperties::baseplate(name),
         bounds,
     })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct LayerKey {
+    cell_name: String,
+    layer: i32,
+    datatype: i32,
+}
+
+#[derive(Clone, Debug)]
+struct LayerGeometry {
+    bounds: Bounds2d,
+    polygons: Vec<Polygon2d>,
+}
+
+fn add_layer_polygon(
+    layers: &mut IndexMap<LayerKey, LayerGeometry>,
+    cell_name: &str,
+    layer: i16,
+    datatype: i16,
+    polygon: Option<Polygon2d>,
+) {
+    if is_metadata_cell(cell_name) {
+        return;
+    }
+
+    let Some(polygon) = polygon else {
+        return;
+    };
+    let Some(bounds) = polygon_bounds(&polygon) else {
+        return;
+    };
+
+    let key = LayerKey {
+        cell_name: cell_name.to_owned(),
+        layer: i32::from(layer),
+        datatype: i32::from(datatype),
+    };
+    let layer = layers.entry(key).or_insert_with(|| LayerGeometry {
+        bounds: bounds.clone(),
+        polygons: Vec::new(),
+    });
+    merge_bounds(&mut layer.bounds, &bounds);
+    layer.polygons.push(polygon);
+}
+
+fn parse_coordinate_scale(db_in_user: f64) -> anyhow::Result<f32> {
+    if !db_in_user.is_finite() || db_in_user <= 0.0 {
+        anyhow::bail!("invalid GDS library unit scale: {db_in_user}");
+    }
+    if db_in_user > f64::from(f32::MAX) {
+        anyhow::bail!("GDS library unit scale is too large: {db_in_user}");
+    }
+    Ok(db_in_user as f32)
+}
+
+fn polygon_from_points(
+    points: impl IntoIterator<Item = GdsPoint>,
+    coordinate_scale: f32,
+) -> Option<Polygon2d> {
+    let mut polygon = Polygon2d { points: Vec::new() };
+    for point in points {
+        let x = point.x as f32 * coordinate_scale;
+        let y = point.y as f32 * coordinate_scale;
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        let next = [x, y];
+        if polygon.points.last().is_some_and(|last| *last == next) {
+            continue;
+        }
+        polygon.points.push(next);
+    }
+
+    if polygon.points.len() >= 2 && polygon.points.first() == polygon.points.last() {
+        polygon.points.pop();
+    }
+    if polygon.points.len() < 3 {
+        return None;
+    }
+    polygon_bounds(&polygon)?;
+    Some(polygon)
+}
+
+fn polygon_bounds(polygon: &Polygon2d) -> Option<Bounds2d> {
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for [x, y] in &polygon.points {
+        min_x = min_x.min(*x);
+        min_y = min_y.min(*y);
+        max_x = max_x.max(*x);
+        max_y = max_y.max(*y);
+    }
+
+    if min_x >= max_x || min_y >= max_y {
+        return None;
+    }
+    Some(Bounds2d {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+    })
+}
+
+fn merge_bounds(target: &mut Bounds2d, other: &Bounds2d) {
+    target.min_x = target.min_x.min(other.min_x);
+    target.min_y = target.min_y.min(other.min_y);
+    target.max_x = target.max_x.max(other.max_x);
+    target.max_y = target.max_y.max(other.max_y);
+}
+
+fn is_metadata_cell(name: &str) -> bool {
+    name.starts_with("$$$") && name.ends_with("$$$")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{SceneObject, import_gds_layers};
+
+    #[test]
+    fn imports_gds_boundaries_as_layer_objects() {
+        let objects = import_gds_layers(Path::new("models/AWG.gds")).expect("import sample GDS");
+        assert!(!objects.is_empty());
+        for obj in objects {
+            let SceneObject::GdsLayer(layer) = obj else {
+                panic!("expected GDS layer object");
+            };
+            assert!(!layer.cell_name.starts_with("$$$"));
+            assert!(!layer.polygons.is_empty());
+            assert!(layer.bounds.min_x < layer.bounds.max_x);
+            assert!(layer.bounds.min_y < layer.bounds.max_y);
+        }
+    }
 }

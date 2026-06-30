@@ -196,9 +196,9 @@ status.ready:
 status.import_failed:
   en: "Import failed: %{error}"
   zh-CN: "导入失败：%{error}"
-status.import_placeholder:
-  en: "Registered %{name} as a migration placeholder; GDS parsing is the next Rust milestone"
-  zh-CN: "已将 %{name} 注册为迁移占位对象；下一步会迁移 GDS 解析"
+status.imported_gds:
+  en: "Imported %{name}: %{count} layer objects"
+  zh-CN: "已导入 %{name}：%{count} 个图层对象"
 status.opened:
   en: "Opened %{name}"
   zh-CN: "已打开 %{name}"

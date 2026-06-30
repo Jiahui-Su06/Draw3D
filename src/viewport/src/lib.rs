@@ -1,3 +1,5 @@
+use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, Color32, Rect, Sense, Vec2};
@@ -25,26 +27,35 @@ pub struct Bounds2d {
     pub max_y: f32,
 }
 
+/// A single closed 2D polygon ring rendered by the viewport.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Polygon2d {
+    pub points: Vec<[f32; 2]>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewportObject {
     pub id: String,
     pub bounds: Bounds2d,
+    pub visible: bool,
     pub color: String,
     pub brightness: f32,
     pub opacity: f32,
     pub z_min: f32,
     pub z_max: f32,
+    pub polygons: Arc<[Polygon2d]>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ViewportScene {
+    pub revision: u64,
     pub objects: Vec<ViewportObject>,
     pub selected_id: Option<String>,
 }
 
 impl ViewportScene {
     pub fn object_count(&self) -> usize {
-        self.objects.len()
+        self.objects.iter().filter(|obj| obj.visible).count()
     }
 }
 
@@ -263,6 +274,8 @@ struct WgpuViewport {
     overlay_index_capacity_bytes: u64,
     index_count: u32,
     overlay_index_count: u32,
+    mesh_revision: Option<u64>,
+    object_meshes: HashMap<String, CachedObjectMesh>,
 }
 
 impl WgpuViewport {
@@ -438,6 +451,8 @@ impl WgpuViewport {
             overlay_index_capacity_bytes: BUFFER_SIZE_MIN,
             index_count: 0,
             overlay_index_count: 0,
+            mesh_revision: None,
+            object_meshes: HashMap::new(),
         }
     }
 
@@ -451,32 +466,37 @@ impl WgpuViewport {
         let uniform = ViewUniform::from_request(request);
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
 
-        let mesh = request.mesh();
-        self.index_count = mesh.indices.len() as u32;
-        if !mesh.vertices.is_empty() && !mesh.indices.is_empty() {
-            let vertex_size = std::mem::size_of_val(mesh.vertices.as_slice()) as u64;
-            if vertex_size > self.vertex_capacity_bytes {
-                self.vertex_capacity_bytes = next_buffer_size(vertex_size);
-                self.vertex_buffer = create_copy_buffer(
-                    device,
-                    "gds3d_viewport_vertex_buffer",
-                    wgpu::BufferUsages::VERTEX,
-                    self.vertex_capacity_bytes,
-                );
-            }
-            queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&mesh.vertices));
+        if self.mesh_revision != Some(request.scene_revision) {
+            let mesh = request.mesh(&mut self.object_meshes);
+            self.index_count = mesh.indices.len() as u32;
+            if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+                self.mesh_revision = Some(request.scene_revision);
+            } else {
+                let vertex_size = std::mem::size_of_val(mesh.vertices.as_slice()) as u64;
+                if vertex_size > self.vertex_capacity_bytes {
+                    self.vertex_capacity_bytes = next_buffer_size(vertex_size);
+                    self.vertex_buffer = create_copy_buffer(
+                        device,
+                        "gds3d_viewport_vertex_buffer",
+                        wgpu::BufferUsages::VERTEX,
+                        self.vertex_capacity_bytes,
+                    );
+                }
+                queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&mesh.vertices));
 
-            let index_size = std::mem::size_of_val(mesh.indices.as_slice()) as u64;
-            if index_size > self.index_capacity_bytes {
-                self.index_capacity_bytes = next_buffer_size(index_size);
-                self.index_buffer = create_copy_buffer(
-                    device,
-                    "gds3d_viewport_index_buffer",
-                    wgpu::BufferUsages::INDEX,
-                    self.index_capacity_bytes,
-                );
+                let index_size = std::mem::size_of_val(mesh.indices.as_slice()) as u64;
+                if index_size > self.index_capacity_bytes {
+                    self.index_capacity_bytes = next_buffer_size(index_size);
+                    self.index_buffer = create_copy_buffer(
+                        device,
+                        "gds3d_viewport_index_buffer",
+                        wgpu::BufferUsages::INDEX,
+                        self.index_capacity_bytes,
+                    );
+                }
+                queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&mesh.indices));
+                self.mesh_revision = Some(request.scene_revision);
             }
-            queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&mesh.indices));
         }
 
         let overlay = request.overlay_mesh(screen_descriptor.pixels_per_point);
@@ -786,40 +806,64 @@ impl LineRequest {
 
 #[derive(Clone)]
 struct RenderRequest {
+    scene_revision: u64,
     bounds: SceneBounds,
     camera: CameraRequest,
     show_axes: bool,
     rect: Rect,
-    objects: Vec<MeshRequest>,
+    objects: Vec<ViewportObject>,
     selection: Vec<LineRequest>,
 }
 
 impl RenderRequest {
     fn from_scene(scene: &ViewportScene, state: &ViewportState, rect: Rect) -> Self {
         let bounds = scene_bounds(scene).unwrap_or_default();
-        let mut objects = Vec::new();
         let mut selected_lines = Vec::new();
         for obj in &scene.objects {
-            objects.push(MeshRequest::object(obj));
-            if scene.selected_id.as_deref() == Some(obj.id.as_str()) {
+            if obj.visible && scene.selected_id.as_deref() == Some(obj.id.as_str()) {
                 selected_lines.extend(selection_lines(obj, &bounds));
             }
         }
 
         Self {
+            scene_revision: scene.revision,
             bounds,
             camera: CameraRequest::new(&bounds, state, rect),
             show_axes: state.show_axes,
             rect,
-            objects,
+            objects: scene.objects.clone(),
             selection: selected_lines,
         }
     }
 
-    fn mesh(&self) -> ViewportMesh {
+    fn mesh(&self, cache: &mut HashMap<String, CachedObjectMesh>) -> ViewportMesh {
+        cache.retain(|id, _mesh| {
+            self.objects
+                .iter()
+                .any(|obj| obj.id.as_str() == id.as_str())
+        });
+
         let mut mesh = ViewportMesh::new();
         for object in &self.objects {
-            mesh.append(object);
+            if !object.visible {
+                continue;
+            }
+            let object_key = object_mesh_key(object);
+            let object_mesh = cache
+                .entry(object.id.clone())
+                .and_modify(|cached| {
+                    if cached.key != object_key {
+                        *cached = CachedObjectMesh {
+                            key: object_key,
+                            mesh: MeshRequest::object(object),
+                        };
+                    }
+                })
+                .or_insert_with(|| CachedObjectMesh {
+                    key: object_key,
+                    mesh: MeshRequest::object(object),
+                });
+            mesh.append(&object_mesh.mesh);
         }
         mesh
     }
@@ -941,15 +985,40 @@ struct MeshRequest {
     indices: Vec<u32>,
 }
 
+struct CachedObjectMesh {
+    key: u64,
+    mesh: MeshRequest,
+}
+
 impl MeshRequest {
     fn object(obj: &ViewportObject) -> Self {
-        box_mesh(
-            &obj.bounds,
-            obj.z_min,
-            obj.z_max,
-            parse_hex_color(&obj.color, obj.brightness, obj.opacity),
-        )
+        let color = parse_hex_color(&obj.color, obj.brightness, obj.opacity);
+        if obj.polygons.is_empty() {
+            return box_mesh(&obj.bounds, obj.z_min, obj.z_max, color);
+        }
+        polygon_mesh(&obj.polygons, obj.z_min, obj.z_max, color)
     }
+}
+
+fn object_mesh_key(obj: &ViewportObject) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    obj.id.hash(&mut hasher);
+    hash_f32(&mut hasher, obj.bounds.min_x);
+    hash_f32(&mut hasher, obj.bounds.min_y);
+    hash_f32(&mut hasher, obj.bounds.max_x);
+    hash_f32(&mut hasher, obj.bounds.max_y);
+    obj.color.hash(&mut hasher);
+    hash_f32(&mut hasher, obj.brightness);
+    hash_f32(&mut hasher, obj.opacity);
+    hash_f32(&mut hasher, obj.z_min);
+    hash_f32(&mut hasher, obj.z_max);
+    obj.polygons.as_ptr().hash(&mut hasher);
+    obj.polygons.len().hash(&mut hasher);
+    hasher.finish()
+}
+
+fn hash_f32(hasher: &mut DefaultHasher, value: f32) {
+    value.to_bits().hash(hasher);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1064,6 +1133,9 @@ impl SceneBounds {
 fn scene_bounds(scene: &ViewportScene) -> Option<SceneBounds> {
     let mut bounds = None::<SceneBounds>;
     for obj in &scene.objects {
+        if !obj.visible {
+            continue;
+        }
         let object_bounds = object_scene_bounds(&obj.bounds, obj.z_min, obj.z_max);
         bounds = Some(match bounds {
             None => object_bounds,
@@ -1152,7 +1224,123 @@ fn box_mesh(bounds: &Bounds2d, z_min: f32, z_max: f32, color: [f32; 4]) -> MeshR
     mesh
 }
 
+fn polygon_mesh(polygons: &[Polygon2d], z_min: f32, z_max: f32, color: [f32; 4]) -> MeshRequest {
+    let mut mesh = MeshRequest {
+        vertices: Vec::new(),
+        indices: Vec::new(),
+    };
+    let z0 = z_min.min(z_max);
+    let z1 = z_min.max(z_max);
+
+    for polygon in polygons {
+        append_polygon(&mut mesh, polygon, z0, z1, color);
+    }
+    mesh
+}
+
+fn append_polygon(mesh: &mut MeshRequest, polygon: &Polygon2d, z0: f32, z1: f32, color: [f32; 4]) {
+    let points = normalized_polygon_points(polygon);
+    if points.len() < 3 {
+        return;
+    }
+
+    let mut coordinates = Vec::with_capacity(points.len() * 2);
+    for [x, y] in &points {
+        coordinates.push(*x);
+        coordinates.push(*y);
+    }
+
+    let Ok(triangles) = earcutr::earcut(&coordinates, &[], 2) else {
+        return;
+    };
+    if triangles.is_empty() {
+        return;
+    }
+
+    for triangle in triangles.chunks_exact(3) {
+        let a = points[triangle[0]];
+        let b = points[triangle[1]];
+        let c = points[triangle[2]];
+        let top = [
+            Vec3::new(a[0], a[1], z1),
+            Vec3::new(b[0], b[1], z1),
+            Vec3::new(c[0], c[1], z1),
+        ];
+        let bottom = [
+            Vec3::new(c[0], c[1], z0),
+            Vec3::new(b[0], b[1], z0),
+            Vec3::new(a[0], a[1], z0),
+        ];
+        if !push_triangle(mesh, top, Vec3::new(0.0, 0.0, 1.0), color) {
+            return;
+        }
+        if !push_triangle(mesh, bottom, Vec3::new(0.0, 0.0, -1.0), color) {
+            return;
+        }
+    }
+
+    if (z1 - z0).abs() <= f32::EPSILON {
+        return;
+    }
+    for index in 0..points.len() {
+        let next_index = (index + 1) % points.len();
+        let a = points[index];
+        let b = points[next_index];
+        let edge = Vec3::new(b[0] - a[0], b[1] - a[1], 0.0);
+        if edge.length() <= f32::EPSILON {
+            continue;
+        }
+        let normal = Vec3::new(edge.y, -edge.x, 0.0).normalized();
+        push_quad(
+            mesh,
+            [
+                Vec3::new(a[0], a[1], z0),
+                Vec3::new(b[0], b[1], z0),
+                Vec3::new(b[0], b[1], z1),
+                Vec3::new(a[0], a[1], z1),
+            ],
+            normal,
+            color,
+        );
+    }
+}
+
+fn normalized_polygon_points(polygon: &Polygon2d) -> Vec<[f32; 2]> {
+    let mut points = Vec::with_capacity(polygon.points.len());
+    for point in &polygon.points {
+        if !point[0].is_finite() || !point[1].is_finite() {
+            return Vec::new();
+        }
+        if points.last().is_some_and(|last| last == point) {
+            continue;
+        }
+        points.push(*point);
+    }
+    if points.len() >= 2 && points.first() == points.last() {
+        points.pop();
+    }
+    points
+}
+
+fn push_triangle(mesh: &mut MeshRequest, points: [Vec3; 3], normal: Vec3, color: [f32; 4]) -> bool {
+    if mesh.vertices.len() > u32::MAX as usize - 3 {
+        return false;
+    }
+
+    let base = mesh.vertices.len() as u32;
+    for point in points {
+        mesh.vertices
+            .push(ViewportVertex::new(point, normal, color));
+    }
+    mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    true
+}
+
 fn push_quad(mesh: &mut MeshRequest, points: [Vec3; 4], normal: Vec3, color: [f32; 4]) {
+    if mesh.vertices.len() > u32::MAX as usize - 4 {
+        return;
+    }
+
     let base = mesh.vertices.len() as u32;
     for point in points {
         mesh.vertices

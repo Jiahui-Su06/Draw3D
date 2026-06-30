@@ -819,6 +819,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
+name = "earcutr"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "afc28d89ac6cb489f679fcf51aaa62b4667bb0fb73a30f1d4d23949069707c07"
+dependencies = [
+ "itertools 0.14.0",
+ "num-traits",
+]
+
+[[package]]
 name = "ecolor"
 version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1227,6 +1237,7 @@ dependencies = [
  "anyhow",
  "eframe",
  "gds3d-viewport",
+ "gdsii",
  "indexmap",
  "lucide-icons",
  "rfd",
@@ -1241,7 +1252,18 @@ name = "gds3d-viewport"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "earcutr",
  "eframe",
+]
+
+[[package]]
+name = "gdsii"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f4375c2d84f67caef9899578cbfb8a72a62f72ad6f9ef9ac2370752029eb537"
+dependencies = [
+ "thiserror 2.0.18",
+ "zerocopy",
 ]
 
 [[package]]

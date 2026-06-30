@@ -7,4 +7,5 @@ license = "MIT"
 
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
+earcutr = "0.5"
 eframe = { version = "0.35", default-features = false, features = ["wgpu"] }
