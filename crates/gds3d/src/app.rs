@@ -275,57 +275,54 @@ impl Gds3dApp {
     fn show_menu(&mut self, parent_ui: &mut egui::Ui) {
         egui::Panel::top("menu_bar").show(parent_ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button(t!("menu.file").to_string(), |ui| {
-                    if ui.button(t!("action.open_project").to_string()).clicked() {
+                ui.menu_button(t!("menu.file").as_ref(), |ui| {
+                    if ui.button(t!("action.open_project").as_ref()).clicked() {
                         ui.close();
                         self.open_project();
                     }
-                    if ui.button(t!("action.import_gds").to_string()).clicked() {
+                    if ui.button(t!("action.import_gds").as_ref()).clicked() {
                         ui.close();
                         self.import_gds();
                     }
                     ui.separator();
-                    if ui.button(t!("action.export_project").to_string()).clicked() {
+                    if ui.button(t!("action.export_project").as_ref()).clicked() {
                         ui.close();
                         self.export_project();
                     }
-                    if ui.button(t!("action.export_as").to_string()).clicked() {
+                    if ui.button(t!("action.export_as").as_ref()).clicked() {
                         ui.close();
                         self.show_export_dialog = true;
                     }
                 });
 
-                ui.menu_button(t!("menu.edit").to_string(), |ui| {
+                ui.menu_button(t!("menu.edit").as_ref(), |ui| {
                     if ui
                         .add_enabled(
                             !self.undo_stack.is_empty(),
-                            egui::Button::new(t!("action.undo").to_string()),
+                            egui::Button::new(t!("action.undo").as_ref()),
                         )
                         .clicked()
                     {
                         ui.close();
                         self.undo();
                     }
-                    if ui
-                        .button(t!("action.create_baseplate").to_string())
-                        .clicked()
-                    {
+                    if ui.button(t!("action.create_baseplate").as_ref()).clicked() {
                         ui.close();
                         self.create_baseplate();
                     }
-                    if ui.button(t!("action.delete").to_string()).clicked() {
+                    if ui.button(t!("action.delete").as_ref()).clicked() {
                         ui.close();
                         self.delete_selection();
                     }
                     ui.separator();
-                    if ui.button(t!("action.reset_camera").to_string()).clicked() {
+                    if ui.button(t!("action.reset_camera").as_ref()).clicked() {
                         ui.close();
                         self.viewport.reset_camera();
                     }
                 });
 
-                ui.menu_button(t!("menu.settings").to_string(), |ui| {
-                    ui.menu_button(t!("menu.language").to_string(), |ui| {
+                ui.menu_button(t!("menu.settings").as_ref(), |ui| {
+                    ui.menu_button(t!("menu.language").as_ref(), |ui| {
                         for locale in [Locale::English, Locale::SimplifiedChinese] {
                             if ui
                                 .radio_value(&mut self.locale, locale, locale.label())
@@ -339,15 +336,15 @@ impl Gds3dApp {
                     ui.separator();
                     ui.checkbox(
                         &mut self.viewport.show_axes,
-                        t!("setting.show_axes").to_string(),
+                        t!("setting.show_axes").as_ref(),
                     );
                     ui.add(
                         egui::Slider::new(&mut self.left_panel_min_width, 160.0..=420.0)
-                            .text(t!("setting.left_panel").to_string()),
+                            .text(t!("setting.left_panel").as_ref()),
                     );
                     ui.add(
                         egui::Slider::new(&mut self.right_panel_min_width, 220.0..=520.0)
-                            .text(t!("setting.right_panel").to_string()),
+                            .text(t!("setting.right_panel").as_ref()),
                     );
                 });
             });
@@ -359,9 +356,7 @@ impl Gds3dApp {
             ui.horizontal(|ui| {
                 ui.label(&self.status);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        t!("status.object_count", count = self.scene.object_count()).to_string(),
-                    );
+                    ui.label(t!("status.object_count", count = self.scene.object_count()).as_ref());
                 });
             });
         });
@@ -374,7 +369,7 @@ impl Gds3dApp {
             .size_range(160.0..=520.0)
             .show(parent_ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                ui.label(RichText::new(t!("panel.scene").to_string()).strong());
+                ui.label(RichText::new(t!("panel.scene").as_ref()).strong());
                 ui.separator();
 
                 let groups = self.scene.cell_groups();
@@ -454,7 +449,7 @@ impl Gds3dApp {
             .default_size(self.right_panel_min_width)
             .size_range(220.0..=560.0)
             .show(parent_ui, |ui| {
-                ui.heading(t!("panel.properties").to_string());
+                ui.heading(t!("panel.properties").as_ref());
                 ui.separator();
                 match self.selection.clone() {
                     Selection::Scene => self.show_scene_properties(ui),
@@ -467,12 +462,12 @@ impl Gds3dApp {
     fn show_scene_properties(&self, ui: &mut egui::Ui) {
         readonly_row(
             ui,
-            &t!("property.selection").to_string(),
-            &t!("property.selection_scene").to_string(),
+            t!("property.selection").as_ref(),
+            t!("property.selection_scene").as_ref(),
         );
         readonly_row(
             ui,
-            &t!("property.objects").to_string(),
+            t!("property.objects").as_ref(),
             &self.scene.object_count().to_string(),
         );
     }
@@ -481,25 +476,25 @@ impl Gds3dApp {
         let object_ids = self.object_ids_for_cell(key);
         readonly_row(
             ui,
-            &t!("property.selection").to_string(),
-            &t!("property.selection_cell").to_string(),
+            t!("property.selection").as_ref(),
+            t!("property.selection_cell").as_ref(),
         );
-        readonly_row(ui, &t!("property.cell").to_string(), &key.cell_name);
+        readonly_row(ui, t!("property.cell").as_ref(), &key.cell_name);
         readonly_row(
             ui,
-            &t!("property.file").to_string(),
+            t!("property.file").as_ref(),
             &key.file_path.display().to_string(),
         );
         readonly_row(
             ui,
-            &t!("property.layers").to_string(),
+            t!("property.layers").as_ref(),
             &object_ids.len().to_string(),
         );
     }
 
     fn show_object_properties(&mut self, ui: &mut egui::Ui, object_id: &str) {
         let Some(before) = self.scene.get(object_id).cloned() else {
-            ui.label(t!("property.no_component_selected").to_string());
+            ui.label(t!("property.no_component_selected").as_ref());
             return;
         };
 
@@ -510,43 +505,39 @@ impl Gds3dApp {
         match obj {
             SceneObject::GdsLayer(layer) => {
                 editable_display(ui, &mut layer.display);
+                readonly_row(ui, t!("property.layer").as_ref(), &layer.layer.to_string());
                 readonly_row(
                     ui,
-                    &t!("property.layer").to_string(),
-                    &layer.layer.to_string(),
-                );
-                readonly_row(
-                    ui,
-                    &t!("property.datatype").to_string(),
+                    t!("property.datatype").as_ref(),
                     &layer.datatype.to_string(),
                 );
                 readonly_row(
                     ui,
-                    &t!("property.file").to_string(),
+                    t!("property.file").as_ref(),
                     &layer.file_path.display().to_string(),
                 );
-                readonly_row(ui, &t!("property.cell").to_string(), &layer.cell_name);
+                readonly_row(ui, t!("property.cell").as_ref(), &layer.cell_name);
                 readonly_bounds(ui, &layer.bounds);
             }
             SceneObject::Baseplate(baseplate) => {
                 editable_display(ui, &mut baseplate.display);
                 ui.separator();
-                ui.label(RichText::new(t!("property.bounds").to_string()).strong());
+                ui.label(RichText::new(t!("property.bounds").as_ref()).strong());
                 ui.add(
                     egui::DragValue::new(&mut baseplate.bounds.min_x)
-                        .prefix(t!("property.x_min_prefix").to_string()),
+                        .prefix(t!("property.x_min_prefix").as_ref()),
                 );
                 ui.add(
                     egui::DragValue::new(&mut baseplate.bounds.max_x)
-                        .prefix(t!("property.x_max_prefix").to_string()),
+                        .prefix(t!("property.x_max_prefix").as_ref()),
                 );
                 ui.add(
                     egui::DragValue::new(&mut baseplate.bounds.min_y)
-                        .prefix(t!("property.y_min_prefix").to_string()),
+                        .prefix(t!("property.y_min_prefix").as_ref()),
                 );
                 ui.add(
                     egui::DragValue::new(&mut baseplate.bounds.max_y)
-                        .prefix(t!("property.y_max_prefix").to_string()),
+                        .prefix(t!("property.y_max_prefix").as_ref()),
                 );
             }
         }
@@ -557,12 +548,12 @@ impl Gds3dApp {
     fn show_export_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_export_dialog;
         let mut should_close = false;
-        egui::Window::new(t!("dialog.export_as").to_string())
+        egui::Window::new(t!("dialog.export_as").as_ref())
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                egui::ComboBox::from_label(t!("export.format").to_string())
+                egui::ComboBox::from_label(t!("export.format").as_ref())
                     .selected_text(self.export_settings.format.label())
                     .show_ui(ui, |ui| {
                         for format in ExportFormat::ALL {
@@ -575,7 +566,7 @@ impl Gds3dApp {
                     });
 
                 if self.export_settings.format.needs_image_size() {
-                    egui::ComboBox::from_label(t!("export.size").to_string())
+                    egui::ComboBox::from_label(t!("export.size").as_ref())
                         .selected_text(self.export_settings.size_preset.label())
                         .show_ui(ui, |ui| {
                             for preset in ExportSizePreset::ALL {
@@ -586,7 +577,7 @@ impl Gds3dApp {
                                 );
                             }
                         });
-                    egui::ComboBox::from_label(t!("export.quality").to_string())
+                    egui::ComboBox::from_label(t!("export.quality").as_ref())
                         .selected_text(self.export_settings.quality.label())
                         .show_ui(ui, |ui| {
                             for quality in ExportQuality::ALL {
@@ -604,7 +595,7 @@ impl Gds3dApp {
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button(t!("action.export").to_string()).clicked() {
+                    if ui.button(t!("action.export").as_ref()).clicked() {
                         self.status = t!(
                             "status.export_mapped",
                             format = self.export_settings.format.label()
@@ -612,7 +603,7 @@ impl Gds3dApp {
                         .to_string();
                         should_close = true;
                     }
-                    if ui.button(t!("action.cancel").to_string()).clicked() {
+                    if ui.button(t!("action.cancel").as_ref()).clicked() {
                         should_close = true;
                     }
                 });
@@ -628,6 +619,10 @@ fn configure_fonts(ctx: &egui::Context) {
         egui::FontData::from_static(include_bytes!("../../fonts/NotoSans-Regular.ttf")).into(),
     );
     fonts.font_data.insert(
+        "noto_sans_cjk".to_owned(),
+        egui::FontData::from_static(include_bytes!("../../fonts/NotoSansCJKsc-Regular.otf")).into(),
+    );
+    fonts.font_data.insert(
         "lucide".to_owned(),
         egui::FontData::from_static(lucide_icons::LUCIDE_FONT_BYTES).into(),
     );
@@ -639,9 +634,14 @@ fn configure_fonts(ctx: &egui::Context) {
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         fonts
             .families
-            .entry(family)
+            .entry(family.clone())
             .or_default()
             .insert(0, "noto_sans".to_owned());
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("noto_sans_cjk".to_owned());
     }
 
     ctx.set_fonts(fonts);
@@ -742,11 +742,12 @@ fn tree_row(
             Sense::click(),
         );
         paint_disclosure(ui, disclosure_rect, is_expanded, icon_color);
-        response.on_hover_text(if is_expanded {
+        let tooltip = if is_expanded {
             t!("tooltip.collapse").to_string()
         } else {
             t!("tooltip.expand").to_string()
-        })
+        };
+        response.on_hover_text(tooltip)
     });
 
     let label_left = if expanded.is_some() {
@@ -780,11 +781,12 @@ fn tree_row(
         let eye_rect = eye_rect.expect("eye rect exists when visible is Some");
         let response = ui.interact(eye_rect, row.id.with(("visibility", text)), Sense::click());
         paint_eye(ui, eye_rect, is_visible, icon_color);
-        response.on_hover_text(if is_visible {
+        let tooltip = if is_visible {
             t!("tooltip.hide").to_string()
         } else {
             t!("tooltip.show").to_string()
-        })
+        };
+        response.on_hover_text(tooltip)
     });
 
     let row = if let Some(tooltip) = tooltip {
@@ -846,29 +848,25 @@ fn paint_lucide_icon(ui: &egui::Ui, rect: Rect, icon: Icon, size: f32, color: Co
 }
 
 fn editable_display(ui: &mut egui::Ui, display: &mut model::DisplayProperties) {
-    ui.label(RichText::new(t!("property.display").to_string()).strong());
+    ui.label(RichText::new(t!("property.display").as_ref()).strong());
     ui.horizontal(|ui| {
-        ui.label(t!("property.name").to_string());
+        ui.label(t!("property.name").as_ref());
         ui.text_edit_singleline(&mut display.name);
     });
-    ui.checkbox(&mut display.visible, t!("property.visible").to_string());
+    ui.checkbox(&mut display.visible, t!("property.visible").as_ref());
     ui.horizontal(|ui| {
-        ui.label(t!("property.color").to_string());
+        ui.label(t!("property.color").as_ref());
         ui.text_edit_singleline(&mut display.color);
     });
     ui.add(
         egui::Slider::new(&mut display.brightness, 0.0..=2.0)
-            .text(t!("property.brightness").to_string()),
+            .text(t!("property.brightness").as_ref()),
     );
     ui.add(
-        egui::Slider::new(&mut display.opacity, 0.0..=1.0).text(t!("property.opacity").to_string()),
+        egui::Slider::new(&mut display.opacity, 0.0..=1.0).text(t!("property.opacity").as_ref()),
     );
-    ui.add(
-        egui::DragValue::new(&mut display.z_min).prefix(t!("property.z_min_prefix").to_string()),
-    );
-    ui.add(
-        egui::DragValue::new(&mut display.z_max).prefix(t!("property.z_max_prefix").to_string()),
-    );
+    ui.add(egui::DragValue::new(&mut display.z_min).prefix(t!("property.z_min_prefix").as_ref()));
+    ui.add(egui::DragValue::new(&mut display.z_max).prefix(t!("property.z_max_prefix").as_ref()));
 }
 
 fn readonly_row(ui: &mut egui::Ui, label: &str, value: &str) {
@@ -880,25 +878,25 @@ fn readonly_row(ui: &mut egui::Ui, label: &str, value: &str) {
 
 fn readonly_bounds(ui: &mut egui::Ui, bounds: &model::Bounds2d) {
     ui.separator();
-    ui.label(RichText::new(t!("property.bounds").to_string()).strong());
+    ui.label(RichText::new(t!("property.bounds").as_ref()).strong());
     readonly_row(
         ui,
-        &t!("property.x_min").to_string(),
+        t!("property.x_min").as_ref(),
         &format!("{:.4}", bounds.min_x),
     );
     readonly_row(
         ui,
-        &t!("property.x_max").to_string(),
+        t!("property.x_max").as_ref(),
         &format!("{:.4}", bounds.max_x),
     );
     readonly_row(
         ui,
-        &t!("property.y_min").to_string(),
+        t!("property.y_min").as_ref(),
         &format!("{:.4}", bounds.min_y),
     );
     readonly_row(
         ui,
-        &t!("property.y_max").to_string(),
+        t!("property.y_max").as_ref(),
         &format!("{:.4}", bounds.max_y),
     );
 }
