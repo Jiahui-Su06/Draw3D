@@ -5,6 +5,8 @@ mod viewport;
 
 use eframe::egui;
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

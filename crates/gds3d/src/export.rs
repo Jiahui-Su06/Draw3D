@@ -1,3 +1,4 @@
+use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -11,12 +12,12 @@ pub enum ExportFormat {
 impl ExportFormat {
     pub const ALL: [Self; 4] = [Self::Png, Self::Svg, Self::Pdf, Self::Gltf];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Png => "PNG",
-            Self::Svg => "SVG",
-            Self::Pdf => "PDF",
-            Self::Gltf => "glTF",
+            Self::Png => t!("export.format_png").to_string(),
+            Self::Svg => t!("export.format_svg").to_string(),
+            Self::Pdf => t!("export.format_pdf").to_string(),
+            Self::Gltf => t!("export.format_gltf").to_string(),
         }
     }
 
@@ -35,11 +36,11 @@ pub enum ExportQuality {
 impl ExportQuality {
     pub const ALL: [Self; 3] = [Self::Low, Self::Standard, Self::High];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Low => "Low",
-            Self::Standard => "Standard",
-            Self::High => "High",
+            Self::Low => t!("export.quality_low").to_string(),
+            Self::Standard => t!("export.quality_standard").to_string(),
+            Self::High => t!("export.quality_high").to_string(),
         }
     }
 
@@ -68,12 +69,12 @@ impl ExportSizePreset {
         Self::Square1x1,
     ];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Figure4x3 => "Figure 4:3",
-            Self::Figure3x2 => "Figure 3:2",
-            Self::Wide16x9 => "Wide 16:9",
-            Self::Square1x1 => "Square 1:1",
+            Self::Figure4x3 => t!("export.size_figure_4_3").to_string(),
+            Self::Figure3x2 => t!("export.size_figure_3_2").to_string(),
+            Self::Wide16x9 => t!("export.size_wide_16_9").to_string(),
+            Self::Square1x1 => t!("export.size_square_1_1").to_string(),
         }
     }
 

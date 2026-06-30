@@ -13,6 +13,8 @@ Current correspondence:
 - Import/open/export actions are wired at the UI/action layer. GDS parsing,
   true project archive compatibility, and renderer-backed export are explicit
   next migration steps.
+- User-visible UI strings are routed through `rust-i18n` with English and
+  Simplified Chinese locale entries under `locales/`.
 - The viewport is currently a lightweight painter-backed 3D projection with
   orbit, pan, zoom, extruded objects, axes, selection highlighting, and depth
   sorting. It is still a migration scaffold before the final `wgpu` renderer.

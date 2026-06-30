@@ -1,4 +1,5 @@
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2};
+use rust_i18n::t;
 
 use crate::model::{Bounds2d, Scene, SceneObject, Selection};
 
@@ -85,7 +86,7 @@ pub fn show_viewport(
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "Import a GDS file or create a baseplate",
+            t!("viewport.empty"),
             egui::FontId::proportional(14.0),
             Color32::from_rgb(91, 101, 112),
         );

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use indexmap::IndexMap;
+use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -167,7 +168,7 @@ impl Scene {
             .objects()
             .filter(|obj| matches!(obj, SceneObject::Baseplate(_)))
             .count();
-        format!("Baseplate {}", count + 1)
+        t!("object.baseplate_name", index = count + 1).to_string()
     }
 
     pub fn cell_groups(&self) -> Vec<CellGroup> {
