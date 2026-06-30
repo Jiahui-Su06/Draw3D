@@ -2,7 +2,7 @@ use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
-use eframe::egui::{self, Color32, Rect, Sense, Vec2};
+use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
 use eframe::{egui_wgpu, wgpu};
 
 const CAMERA_PITCH_MIN: f32 = -1.48;
@@ -66,6 +66,7 @@ pub struct ViewportState {
     pub pan: Vec2,
     pub yaw: f32,
     pub pitch: f32,
+    last_drag_pos: Option<Pos2>,
     renderer: Arc<Mutex<Option<WgpuViewport>>>,
 }
 
@@ -77,6 +78,7 @@ impl Default for ViewportState {
             pan: Vec2::ZERO,
             yaw: -0.65,
             pitch: 0.72,
+            last_drag_pos: None,
             renderer: Arc::new(Mutex::new(None)),
         }
     }
@@ -97,6 +99,7 @@ impl ViewportState {
         self.pan = Vec2::ZERO;
         self.yaw = -0.65;
         self.pitch = 0.72;
+        self.last_drag_pos = None;
     }
 }
 
@@ -139,14 +142,29 @@ pub fn show_viewport(
 
 fn handle_camera_input(ui: &egui::Ui, response: &egui::Response, state: &mut ViewportState) {
     let shift_down = ui.input(|input| input.modifiers.shift);
-    if response.dragged_by(egui::PointerButton::Primary) && !shift_down {
-        let delta = response.drag_motion();
-        state.yaw = (state.yaw - delta.x * CAMERA_ROTATE_SPEED).rem_euclid(std::f32::consts::TAU);
-        state.pitch =
-            (state.pitch + delta.y * CAMERA_ROTATE_SPEED).clamp(CAMERA_PITCH_MIN, CAMERA_PITCH_MAX);
-    }
-    if response.dragged_by(egui::PointerButton::Secondary) || (response.dragged() && shift_down) {
-        state.pan += response.drag_delta();
+    if response.dragged() {
+        let Some(pos) = response.interact_pointer_pos() else {
+            state.last_drag_pos = None;
+            return;
+        };
+        let delta = state
+            .last_drag_pos
+            .map_or(Vec2::ZERO, |last_pos| pos - last_pos);
+        state.last_drag_pos = Some(pos);
+
+        if response.dragged_by(egui::PointerButton::Primary) && !shift_down {
+            state.yaw =
+                (state.yaw - delta.x * CAMERA_ROTATE_SPEED).rem_euclid(std::f32::consts::TAU);
+            state.pitch = (state.pitch + delta.y * CAMERA_ROTATE_SPEED)
+                .clamp(CAMERA_PITCH_MIN, CAMERA_PITCH_MAX);
+        }
+        if response.dragged_by(egui::PointerButton::Secondary)
+            || response.dragged_by(egui::PointerButton::Primary) && shift_down
+        {
+            state.pan += delta;
+        }
+    } else {
+        state.last_drag_pos = None;
     }
     if response.hovered() {
         let (zoom_delta, scroll_y) =
@@ -166,13 +184,7 @@ fn paint_axis_labels(
     state: &ViewportState,
     pixels_per_point: f32,
 ) {
-    let horizontal = state.pitch.cos();
-    let camera_direction = Vec3::new(
-        state.yaw.cos() * horizontal,
-        state.yaw.sin() * horizontal,
-        state.pitch.sin(),
-    );
-    let (right, up, _) = basis_from_forward(camera_direction * -1.0);
+    let (right, up, _) = orbit_basis(state.yaw, state.pitch);
     let origin = egui::pos2(
         rect.left() + AXIS_GIZMO_MARGIN_PX / pixels_per_point,
         rect.bottom() - AXIS_GIZMO_MARGIN_PX / pixels_per_point,
@@ -589,7 +601,6 @@ struct ViewUniform {
 
 impl ViewUniform {
     fn from_request(request: &RenderRequest) -> Self {
-        let (right, up, forward) = camera_basis(request.camera.eye, request.camera.target);
         let half_height = (request.bounds.span() / request.camera.zoom).max(1.0) * 0.5;
         let half_width = half_height * request.camera.aspect.max(0.1);
         let near = 0.1;
@@ -598,9 +609,9 @@ impl ViewUniform {
         Self {
             eye: request.camera.eye.to_vec4(0.0),
             center: request.camera.target.to_vec4(0.0),
-            right: right.to_vec4(0.0),
-            up: up.to_vec4(0.0),
-            forward: forward.to_vec4(0.0),
+            right: request.camera.right.to_vec4(0.0),
+            up: request.camera.up.to_vec4(0.0),
+            forward: request.camera.forward.to_vec4(0.0),
             params: [half_width, half_height, near, far],
         }
     }
@@ -904,6 +915,9 @@ impl RenderRequest {
 struct CameraRequest {
     eye: Vec3,
     target: Vec3,
+    right: Vec3,
+    up: Vec3,
+    forward: Vec3,
     zoom: f32,
     aspect: f32,
 }
@@ -918,13 +932,16 @@ impl CameraRequest {
             state.yaw.sin() * horizontal,
             state.pitch.sin(),
         );
-        let (right, up, _) = basis_from_forward(direction * -1.0);
+        let (right, up, forward) = orbit_basis(state.yaw, state.pitch);
         let pan_x = state.pan.x / rect.width().max(1.0) * span / state.zoom;
         let pan_y = state.pan.y / rect.height().max(1.0) * span / state.zoom;
         let target = center - right * pan_x + up * pan_y;
         Self {
             eye: target + direction * span * CAMERA_DISTANCE_FACTOR,
             target,
+            right,
+            up,
+            forward,
             zoom: state.zoom,
             aspect: rect.width().max(1.0) / rect.height().max(1.0),
         }
@@ -945,15 +962,14 @@ struct Projection {
 
 impl Projection {
     fn new(request: &RenderRequest) -> Self {
-        let (right, up, forward) = camera_basis(request.camera.eye, request.camera.target);
         let half_height = (request.bounds.span() / request.camera.zoom).max(1.0) * 0.5;
         let half_width = half_height * request.camera.aspect.max(0.1);
         Self {
             center: request.camera.target,
             eye: request.camera.eye,
-            right,
-            up,
-            forward,
+            right: request.camera.right,
+            up: request.camera.up,
+            forward: request.camera.forward,
             half_width,
             half_height,
             near: 0.1,
@@ -975,18 +991,15 @@ impl Projection {
     }
 }
 
-fn camera_basis(eye: Vec3, target: Vec3) -> (Vec3, Vec3, Vec3) {
-    basis_from_forward((target - eye).normalized())
-}
+fn orbit_basis(yaw: f32, pitch: f32) -> (Vec3, Vec3, Vec3) {
+    let sin_yaw = yaw.sin();
+    let cos_yaw = yaw.cos();
+    let sin_pitch = pitch.sin();
+    let cos_pitch = pitch.cos();
 
-fn basis_from_forward(forward: Vec3) -> (Vec3, Vec3, Vec3) {
-    let up_seed = if forward.z.abs() > 0.94 {
-        Vec3::new(0.0, 1.0, 0.0)
-    } else {
-        Vec3::new(0.0, 0.0, 1.0)
-    };
-    let right = forward.cross(up_seed).normalized();
-    let up = right.cross(forward).normalized();
+    let forward = Vec3::new(-cos_yaw * cos_pitch, -sin_yaw * cos_pitch, -sin_pitch);
+    let right = Vec3::new(-sin_yaw, cos_yaw, 0.0);
+    let up = Vec3::new(-cos_yaw * sin_pitch, -sin_yaw * sin_pitch, cos_pitch);
     (right, up, forward)
 }
 
@@ -1062,14 +1075,6 @@ impl Vec3 {
 
     fn dot(self, rhs: Self) -> f32 {
         self.x * rhs.x + self.y * rhs.y + self.z * rhs.z
-    }
-
-    fn cross(self, rhs: Self) -> Self {
-        Self {
-            x: self.y * rhs.z - self.z * rhs.y,
-            y: self.z * rhs.x - self.x * rhs.z,
-            z: self.x * rhs.y - self.y * rhs.x,
-        }
     }
 
     fn length(self) -> f32 {

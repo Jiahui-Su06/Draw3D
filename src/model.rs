@@ -33,12 +33,33 @@ pub struct DisplayProperties {
     pub opacity: f32,
     pub z_min: f32,
     pub z_max: f32,
+    #[serde(default)]
+    pub defaults: DisplayDefaults,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DisplayDefaults {
+    pub name: String,
+    pub color: String,
+    pub brightness: f32,
+    pub opacity: f32,
+    pub z_min: f32,
+    pub z_max: f32,
 }
 
 impl DisplayProperties {
     pub fn gds_layer(name: impl Into<String>) -> Self {
+        let name = name.into();
         Self {
-            name: name.into(),
+            defaults: DisplayDefaults {
+                name: name.clone(),
+                color: "#2D6CDF".to_owned(),
+                brightness: 1.0,
+                opacity: 1.0,
+                z_min: 0.0,
+                z_max: 15.0,
+            },
+            name,
             visible: true,
             color: "#2D6CDF".to_owned(),
             brightness: 1.0,
@@ -49,8 +70,17 @@ impl DisplayProperties {
     }
 
     pub fn baseplate(name: impl Into<String>) -> Self {
+        let name = name.into();
         Self {
-            name: name.into(),
+            defaults: DisplayDefaults {
+                name: name.clone(),
+                color: "#5F6B78".to_owned(),
+                brightness: 1.0,
+                opacity: 1.0,
+                z_min: -20.0,
+                z_max: 0.0,
+            },
+            name,
             visible: true,
             color: "#5F6B78".to_owned(),
             brightness: 1.0,
@@ -81,6 +111,8 @@ pub struct BaseplateObject {
     pub id: String,
     pub display: DisplayProperties,
     pub bounds: Bounds2d,
+    #[serde(default)]
+    pub default_bounds: Option<Bounds2d>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -333,6 +365,7 @@ pub fn new_baseplate(name: impl Into<String>, bounds: Bounds2d) -> SceneObject {
     SceneObject::Baseplate(BaseplateObject {
         id: new_object_id(),
         display: DisplayProperties::baseplate(name),
+        default_bounds: Some(bounds.clone()),
         bounds,
     })
 }

@@ -47,12 +47,6 @@ action.reset_camera:
 setting.show_axes:
   en: Show axes
   zh-CN: 显示坐标轴
-setting.left_panel:
-  en: Left panel
-  zh-CN: 左侧面板
-setting.right_panel:
-  en: Right panel
-  zh-CN: 右侧面板
 
 panel.scene:
   en: Scene
@@ -136,8 +130,8 @@ property.cell:
   en: Cell
   zh-CN: 单元
 property.no_component_selected:
-  en: No component selected
-  zh-CN: 未选择组件
+  en: Select an item to view properties
+  zh-CN: 请选择一个项目以查看属性
 property.basic:
   en: Basic
   zh-CN: 基本
@@ -150,6 +144,9 @@ property.name:
 property.visible:
   en: Visible
   zh-CN: 可见
+property.reset:
+  en: Reset
+  zh-CN: 重置
 property.color:
   en: Color
   zh-CN: 颜色

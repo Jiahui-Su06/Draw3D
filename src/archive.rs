@@ -33,6 +33,8 @@ pub struct ArchiveObject {
     pub payload: Value,
 }
 
+pub type ArchiveData = (Vec<ArchiveObject>, HashMap<String, Vec<u8>>);
+
 /// Write a `.gds3d` project archive with `scene.json` and embedded GDS sources.
 pub fn write_archive(file_path: &Path, objects: &[SceneObject]) -> anyhow::Result<()> {
     let path = normalize_output_path(file_path)?;
@@ -44,9 +46,7 @@ pub fn write_archive(file_path: &Path, objects: &[SceneObject]) -> anyhow::Resul
 }
 
 /// Read a `.gds3d` project archive.
-pub fn read_archive(
-    file_path: &Path,
-) -> anyhow::Result<(Vec<ArchiveObject>, HashMap<String, Vec<u8>>)> {
+pub fn read_archive(file_path: &Path) -> anyhow::Result<ArchiveData> {
     if file_path.extension().and_then(|suffix| suffix.to_str()) != Some("gds3d") {
         bail!("selected file is not a .gds3d archive");
     }
@@ -78,10 +78,11 @@ pub fn read_archive(
             continue;
         }
 
-        if let Some(source_name) = entry.name.strip_prefix(&format!("{RAW_GDS_DIR}/")) {
-            if !source_name.is_empty() && safe_archive_name(source_name) {
-                gds_sources.insert(source_name.to_owned(), entry.data);
-            }
+        if let Some(source_name) = entry.name.strip_prefix(&format!("{RAW_GDS_DIR}/"))
+            && !source_name.is_empty()
+            && safe_archive_name(source_name)
+        {
+            gds_sources.insert(source_name.to_owned(), entry.data);
         }
     }
 

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,6 +24,10 @@ const PROPERTY_LABEL_WIDTH: f32 = 88.0;
 const PROPERTY_NUMBER_WIDTH: f32 = 58.0;
 const PROPERTY_ROW_HEIGHT: f32 = 22.0;
 const PROPERTY_VALUE_MIN_WIDTH: f32 = 64.0;
+const PROPERTY_RESET_WIDTH: f32 = 20.0;
+const MENU_POPUP_MIN_WIDTH: f32 = 112.0;
+const SETTINGS_DIR_NAME: &str = "GDS3D";
+const SETTINGS_FILE_NAME: &str = "settings.json";
 
 pub struct Gds3dApp {
     scene: Scene,
@@ -37,8 +42,28 @@ pub struct Gds3dApp {
     left_panel_min_width: f32,
     right_panel_min_width: f32,
     locale: Locale,
+    settings: AppSettings,
     archive_temp_dir: Option<PathBuf>,
     property_edit: PropertyEditState,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct AppSettings {
+    locale: String,
+    show_axes: bool,
+    left_panel_width: f32,
+    right_panel_width: f32,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            locale: "en".to_owned(),
+            show_axes: true,
+            left_panel_width: 240.0,
+            right_panel_width: 280.0,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -112,25 +137,38 @@ impl Locale {
             Self::SimplifiedChinese => "zh-CN",
         }
     }
+
+    fn from_code(code: &str) -> Self {
+        match code {
+            "zh-CN" => Self::SimplifiedChinese,
+            _ => Self::English,
+        }
+    }
 }
 
 impl Gds3dApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         configure_fonts(&cc.egui_ctx);
         configure_industrial_style(&cc.egui_ctx);
+        let settings = load_app_settings();
+        let locale = Locale::from_code(&settings.locale);
+        rust_i18n::set_locale(locale.code());
+        let mut viewport = ViewportState::new(cc.wgpu_render_state.as_ref());
+        viewport.show_axes = settings.show_axes;
         Self {
             scene: Scene::default(),
             selection: Selection::Scene,
             collapsed_cells: HashSet::new(),
-            viewport: ViewportState::new(cc.wgpu_render_state.as_ref()),
+            viewport,
             viewport_scene_cache: ViewportSceneCache::default(),
             undo_stack: Vec::new(),
             status: t!("status.ready").to_string(),
             export_settings: ExportSettings::default(),
             show_export_dialog: false,
-            left_panel_min_width: 240.0,
-            right_panel_min_width: 280.0,
-            locale: Locale::English,
+            left_panel_min_width: settings.left_panel_width,
+            right_panel_min_width: settings.right_panel_width,
+            locale,
+            settings,
             archive_temp_dir: None,
             property_edit: PropertyEditState::default(),
         }
@@ -329,6 +367,22 @@ impl Gds3dApp {
         }
     }
 
+    fn save_panel_widths(&mut self, left_width: f32, right_width: f32) {
+        let left_width = left_width.clamp(160.0, 520.0);
+        let right_width = right_width.clamp(180.0, 560.0);
+        let changed = (self.settings.left_panel_width - left_width).abs() > 0.5
+            || (self.settings.right_panel_width - right_width).abs() > 0.5;
+        if !changed {
+            return;
+        }
+
+        self.left_panel_min_width = left_width;
+        self.right_panel_min_width = right_width;
+        self.settings.left_panel_width = left_width;
+        self.settings.right_panel_width = right_width;
+        save_app_settings(&self.settings);
+    }
+
     fn replace_object_after_edit(&mut self, before: SceneObject) {
         let Some(after) = self.scene.get(before.id()) else {
             return;
@@ -369,6 +423,7 @@ impl Gds3dApp {
         egui::Panel::top("menu_bar").show(parent_ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button(t!("menu.file").as_ref(), |ui| {
+                    ui.set_min_width(MENU_POPUP_MIN_WIDTH);
                     if ui.button(t!("action.open_project").as_ref()).clicked() {
                         ui.close();
                         self.open_project();
@@ -389,6 +444,7 @@ impl Gds3dApp {
                 });
 
                 ui.menu_button(t!("menu.edit").as_ref(), |ui| {
+                    ui.set_min_width(MENU_POPUP_MIN_WIDTH);
                     if ui
                         .add_enabled(
                             !self.undo_stack.is_empty(),
@@ -415,30 +471,30 @@ impl Gds3dApp {
                 });
 
                 ui.menu_button(t!("menu.settings").as_ref(), |ui| {
+                    ui.set_min_width(MENU_POPUP_MIN_WIDTH);
                     ui.menu_button(t!("menu.language").as_ref(), |ui| {
+                        ui.set_min_width(MENU_POPUP_MIN_WIDTH);
                         for locale in [Locale::English, Locale::SimplifiedChinese] {
                             if ui
                                 .radio_value(&mut self.locale, locale, locale.label())
                                 .clicked()
                             {
                                 rust_i18n::set_locale(locale.code());
+                                self.settings.locale = locale.code().to_owned();
+                                save_app_settings(&self.settings);
                                 self.status = t!("status.language_changed").to_string();
                             }
                         }
                     });
                     ui.separator();
-                    ui.checkbox(
+                    let response = ui.checkbox(
                         &mut self.viewport.show_axes,
                         t!("setting.show_axes").as_ref(),
                     );
-                    ui.add(
-                        egui::Slider::new(&mut self.left_panel_min_width, 160.0..=420.0)
-                            .text(t!("setting.left_panel").as_ref()),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut self.right_panel_min_width, 180.0..=520.0)
-                            .text(t!("setting.right_panel").as_ref()),
-                    );
+                    if response.changed() {
+                        self.settings.show_axes = self.viewport.show_axes;
+                        save_app_settings(&self.settings);
+                    }
                 });
             });
         });
@@ -462,7 +518,7 @@ impl Gds3dApp {
     }
 
     fn show_left_panel(&mut self, parent_ui: &mut egui::Ui) {
-        egui::Panel::left("component_tree")
+        let panel = egui::Panel::left("component_tree")
             .resizable(true)
             .default_size(self.left_panel_min_width)
             .size_range(160.0..=520.0)
@@ -517,7 +573,15 @@ impl Gds3dApp {
                 for object_id in baseplate_ids {
                     self.show_object_tree_row(ui, &object_id, 0);
                 }
+
+                let empty_rect = ui.available_rect_before_wrap();
+                let empty_response =
+                    ui.interact(empty_rect, ui.id().with("empty_scene_area"), Sense::click());
+                if empty_response.clicked() {
+                    self.selection = Selection::Scene;
+                }
             });
+        self.save_panel_widths(panel.response.rect.width(), self.right_panel_min_width);
     }
 
     fn show_object_tree_row(&mut self, ui: &mut egui::Ui, object_id: &str, depth: usize) {
@@ -544,7 +608,7 @@ impl Gds3dApp {
     }
 
     fn show_right_panel(&mut self, parent_ui: &mut egui::Ui) {
-        egui::Panel::right("property_panel")
+        let panel = egui::Panel::right("property_panel")
             .resizable(true)
             .default_size(self.right_panel_min_width)
             .size_range(180.0..=560.0)
@@ -559,19 +623,11 @@ impl Gds3dApp {
                     Selection::Object(object_id) => self.show_object_properties(ui, &object_id),
                 }
             });
+        self.save_panel_widths(self.left_panel_min_width, panel.response.rect.width());
     }
 
     fn show_scene_properties(&self, ui: &mut egui::Ui) {
-        readonly_row(
-            ui,
-            t!("property.selection").as_ref(),
-            t!("property.selection_scene").as_ref(),
-        );
-        readonly_row(
-            ui,
-            t!("property.objects").as_ref(),
-            &self.scene.object_count().to_string(),
-        );
+        ui.label(t!("property.no_component_selected").as_ref());
     }
 
     fn show_cell_properties(&self, ui: &mut egui::Ui, key: &CellKey) {
@@ -642,48 +698,50 @@ impl Gds3dApp {
                     t!("property.x_min").as_ref(),
                     &mut self.property_edit.min_x,
                     &mut baseplate.bounds.min_x,
-                    -1_000_000.0..=1_000_000.0,
-                    1.0,
+                    FloatRowOptions::new(-1_000_000.0..=1_000_000.0, 1.0)
+                        .with_default(baseplate.default_bounds.as_ref().map(|bounds| bounds.min_x)),
                 );
                 edit_float_row(
                     ui,
                     t!("property.x_max").as_ref(),
                     &mut self.property_edit.max_x,
                     &mut baseplate.bounds.max_x,
-                    -1_000_000.0..=1_000_000.0,
-                    1.0,
+                    FloatRowOptions::new(-1_000_000.0..=1_000_000.0, 1.0)
+                        .with_default(baseplate.default_bounds.as_ref().map(|bounds| bounds.max_x)),
                 );
                 edit_float_row(
                     ui,
                     t!("property.y_min").as_ref(),
                     &mut self.property_edit.min_y,
                     &mut baseplate.bounds.min_y,
-                    -1_000_000.0..=1_000_000.0,
-                    1.0,
+                    FloatRowOptions::new(-1_000_000.0..=1_000_000.0, 1.0)
+                        .with_default(baseplate.default_bounds.as_ref().map(|bounds| bounds.min_y)),
                 );
                 edit_float_row(
                     ui,
                     t!("property.y_max").as_ref(),
                     &mut self.property_edit.max_y,
                     &mut baseplate.bounds.max_y,
-                    -1_000_000.0..=1_000_000.0,
-                    1.0,
+                    FloatRowOptions::new(-1_000_000.0..=1_000_000.0, 1.0)
+                        .with_default(baseplate.default_bounds.as_ref().map(|bounds| bounds.max_y)),
                 );
                 edit_float_row(
                     ui,
                     t!("property.z_min").as_ref(),
                     &mut self.property_edit.z_min,
                     &mut baseplate.display.z_min,
-                    -1_000_000.0..=1_000_000.0,
-                    1.0,
+                    FloatRowOptions::new(-1_000_000.0..=1_000_000.0, 0.1)
+                        .with_decimals(1)
+                        .with_default(Some(baseplate.display.defaults.z_min)),
                 );
                 edit_float_row(
                     ui,
                     t!("property.z_max").as_ref(),
                     &mut self.property_edit.z_max,
                     &mut baseplate.display.z_max,
-                    -1_000_000.0..=1_000_000.0,
-                    1.0,
+                    FloatRowOptions::new(-1_000_000.0..=1_000_000.0, 0.1)
+                        .with_decimals(1)
+                        .with_default(Some(baseplate.display.defaults.z_max)),
                 );
             }
         }
@@ -1077,6 +1135,7 @@ fn editable_basic(
         t!("property.name").as_ref(),
         &mut edit.name,
         &mut display.name,
+        &display.defaults.name,
     );
 }
 
@@ -1092,6 +1151,7 @@ fn editable_display(
         t!("property.color").as_ref(),
         &mut edit.color,
         &mut display.color,
+        &display.defaults.color,
     );
     edit_float_slider(
         ui,
@@ -1100,6 +1160,7 @@ fn editable_display(
         &mut display.brightness,
         0.0..=2.0,
         0.05,
+        display.defaults.brightness,
     );
     edit_float_slider(
         ui,
@@ -1108,6 +1169,7 @@ fn editable_display(
         &mut display.opacity,
         0.0..=1.0,
         0.05,
+        display.defaults.opacity,
     );
 }
 
@@ -1128,12 +1190,19 @@ fn section_title(ui: &mut egui::Ui, text: &str) {
     );
 }
 
-fn edit_text_row(ui: &mut egui::Ui, label: &str, edit_value: &mut String, target: &mut String) {
+fn edit_text_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    edit_value: &mut String,
+    target: &mut String,
+    default_value: &str,
+) {
     let value_width = property_value_width(ui);
     ui.horizontal(|ui| {
         property_label(ui, RichText::new(label));
+        let field_width = value_width - reset_button_width(ui);
         let response = ui.add_sized(
-            [value_width, PROPERTY_ROW_HEIGHT],
+            [field_width, PROPERTY_ROW_HEIGHT],
             egui::TextEdit::singleline(edit_value),
         );
         let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -1144,13 +1213,24 @@ fn edit_text_row(ui: &mut egui::Ui, label: &str, edit_value: &mut String, target
                 *edit_value = target.clone();
             }
         }
+        if reset_button(ui, target != default_value).clicked() {
+            *target = default_value.to_owned();
+            *edit_value = target.clone();
+        }
     });
 }
 
-fn edit_color_row(ui: &mut egui::Ui, label: &str, edit_value: &mut String, target: &mut String) {
+fn edit_color_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    edit_value: &mut String,
+    target: &mut String,
+    default_value: &str,
+) {
     let value_width = property_value_width(ui);
     ui.horizontal(|ui| {
         property_label(ui, RichText::new(label));
+        let field_width = value_width - reset_button_width(ui);
 
         let mut rgb = parse_hex_rgb(target)
             .or_else(|| parse_hex_rgb(edit_value))
@@ -1162,8 +1242,12 @@ fn edit_color_row(ui: &mut egui::Ui, label: &str, edit_value: &mut String, targe
         }
 
         let spacing = ui.spacing().item_spacing.x;
-        let hex_width = (value_width - response.rect.width() - spacing).max(48.0);
+        let hex_width = (field_width - response.rect.width() - spacing).max(48.0);
         readonly_field(ui, target, hex_width);
+        if reset_button(ui, target != default_value).clicked() {
+            *target = default_value.to_owned();
+            *edit_value = target.clone();
+        }
     });
 }
 
@@ -1174,19 +1258,32 @@ fn edit_float_slider(
     target: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     step: f64,
+    default_value: f32,
 ) {
     let min = *range.start();
     let max = *range.end();
     let value_width = property_value_width(ui);
     ui.horizontal(|ui| {
         property_label(ui, RichText::new(label));
-        let response = slider_field(ui, edit_value, target, min, max, step, value_width);
+        let response = slider_field(
+            ui,
+            edit_value,
+            target,
+            min,
+            max,
+            step,
+            value_width - reset_button_width(ui),
+        );
         if response.number_changed {
             *edit_value = *target;
         } else if response.slider_changed {
             *target = *edit_value;
         } else if !response.slider_dragged {
             *edit_value = *target;
+        }
+        if reset_button(ui, (*target - default_value).abs() > f32::EPSILON).clicked() {
+            *target = default_value;
+            *edit_value = default_value;
         }
     });
 }
@@ -1196,24 +1293,63 @@ fn edit_float_row(
     label: &str,
     edit_value: &mut f32,
     target: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
-    step: f64,
+    options: FloatRowOptions,
 ) {
     let value_width = property_value_width(ui);
     ui.horizontal(|ui| {
         property_label(ui, RichText::new(label));
-        let response = ui.add_sized(
-            [value_width, PROPERTY_ROW_HEIGHT],
-            egui::DragValue::new(edit_value)
-                .speed(step)
-                .range(*range.start()..=*range.end()),
-        );
+        let field_width = if options.default_value.is_some() {
+            value_width - reset_button_width(ui)
+        } else {
+            value_width
+        };
+        let mut drag_value = egui::DragValue::new(edit_value)
+            .speed(options.step)
+            .range(*options.range.start()..=*options.range.end());
+        if let Some(decimals) = options.decimals {
+            drag_value = drag_value.max_decimals(decimals);
+        }
+        let response = ui.add_sized([field_width, PROPERTY_ROW_HEIGHT], drag_value);
         if response.changed() {
             *target = *edit_value;
         }
+        if let Some(default_value) = options.default_value
+            && reset_button(ui, (*target - default_value).abs() > f32::EPSILON).clicked()
+        {
+            *target = default_value;
+            *edit_value = default_value;
+        }
     });
-    *target = target.clamp(*range.start(), *range.end());
-    *edit_value = (*edit_value).clamp(*range.start(), *range.end());
+    *target = target.clamp(*options.range.start(), *options.range.end());
+    *edit_value = (*edit_value).clamp(*options.range.start(), *options.range.end());
+}
+
+struct FloatRowOptions {
+    range: std::ops::RangeInclusive<f32>,
+    step: f64,
+    decimals: Option<usize>,
+    default_value: Option<f32>,
+}
+
+impl FloatRowOptions {
+    fn new(range: std::ops::RangeInclusive<f32>, step: f64) -> Self {
+        Self {
+            range,
+            step,
+            decimals: None,
+            default_value: None,
+        }
+    }
+
+    fn with_decimals(mut self, decimals: usize) -> Self {
+        self.decimals = Some(decimals);
+        self
+    }
+
+    fn with_default(mut self, default_value: Option<f32>) -> Self {
+        self.default_value = default_value;
+        self
+    }
 }
 
 fn property_label(ui: &mut egui::Ui, text: RichText) {
@@ -1229,6 +1365,36 @@ fn property_label(ui: &mut egui::Ui, text: RichText) {
 fn property_value_width(ui: &egui::Ui) -> f32 {
     let spacing = ui.spacing().item_spacing.x;
     (ui.available_width() - PROPERTY_LABEL_WIDTH - spacing).max(PROPERTY_VALUE_MIN_WIDTH)
+}
+
+fn reset_button_width(ui: &egui::Ui) -> f32 {
+    PROPERTY_RESET_WIDTH + ui.spacing().item_spacing.x
+}
+
+fn reset_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(PROPERTY_RESET_WIDTH, PROPERTY_ROW_HEIGHT),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    let response = response.on_hover_text(t!("property.reset").to_string());
+    let color = if enabled {
+        ui.visuals().widgets.inactive.fg_stroke.color
+    } else {
+        ui.visuals().widgets.noninteractive.fg_stroke.color
+    };
+    if enabled && (response.hovered() || response.clicked()) {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(2),
+            ui.visuals().widgets.hovered.bg_fill,
+        );
+    }
+    paint_lucide_icon(ui, rect, Icon::RotateCcw, 13.0, color);
+    response
 }
 
 fn parse_hex_rgb(value: &str) -> Option<[u8; 3]> {
@@ -1332,16 +1498,18 @@ fn readonly_bounds(
         t!("property.z_min").as_ref(),
         &mut edit.z_min,
         &mut display.z_min,
-        -1_000_000.0..=1_000_000.0,
-        1.0,
+        FloatRowOptions::new(-1_000_000.0..=1_000_000.0, 0.1)
+            .with_decimals(1)
+            .with_default(Some(display.defaults.z_min)),
     );
     edit_float_row(
         ui,
         t!("property.z_max").as_ref(),
         &mut edit.z_max,
         &mut display.z_max,
-        -1_000_000.0..=1_000_000.0,
-        1.0,
+        FloatRowOptions::new(-1_000_000.0..=1_000_000.0, 0.1)
+            .with_decimals(1)
+            .with_default(Some(display.defaults.z_max)),
     );
 }
 
@@ -1350,6 +1518,64 @@ fn file_name(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("<unnamed>")
         .to_owned()
+}
+
+fn load_app_settings() -> AppSettings {
+    let Some(path) = settings_path() else {
+        return AppSettings::default();
+    };
+    let Ok(data) = fs::read_to_string(path) else {
+        return AppSettings::default();
+    };
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+fn save_app_settings(settings: &AppSettings) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let Ok(data) = serde_json::to_vec_pretty(settings) else {
+        return;
+    };
+    let _ = fs::write(path, data);
+}
+
+fn settings_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join(SETTINGS_DIR_NAME).join(SETTINGS_FILE_NAME))
+}
+
+#[cfg(target_os = "windows")]
+fn config_dir() -> Option<PathBuf> {
+    env::var_os("APPDATA").map(PathBuf::from)
+}
+
+#[cfg(target_os = "macos")]
+fn config_dir() -> Option<PathBuf> {
+    home_dir().map(|home| home.join("Library").join("Application Support"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn config_dir() -> Option<PathBuf> {
+    env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join(".config")))
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn config_dir() -> Option<PathBuf> {
+    home_dir().map(|home| home.join(".config"))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 fn read_archive_scene(path: &Path) -> anyhow::Result<Scene> {
@@ -1415,6 +1641,7 @@ fn restore_gds_layer(
         .ok_or_else(|| anyhow::anyhow!("unable to restore GDS layer: {source_key}"))?;
 
     restored.display = display_from_payload(payload)?;
+    restored.display.defaults = default_display(&restored.display);
     restored.file_path = archive_path.to_path_buf();
     restored.source_path = source_path.clone();
     restored.source_key = source_key;
@@ -1426,10 +1653,16 @@ fn restore_baseplate(archive_obj: &ArchiveObject) -> anyhow::Result<SceneObject>
         .payload
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("invalid baseplate payload"))?;
+    let bounds = bounds_from_payload(payload)?;
     Ok(SceneObject::Baseplate(BaseplateObject {
         id: model::new_object_id(),
-        display: display_from_payload(payload)?,
-        bounds: bounds_from_payload(payload)?,
+        display: {
+            let mut display = display_from_payload(payload)?;
+            display.defaults = default_display(&display);
+            display
+        },
+        bounds: bounds.clone(),
+        default_bounds: Some(bounds),
     }))
 }
 
@@ -1444,7 +1677,19 @@ fn display_from_payload(
         opacity: f32_field(payload, "opacity")?,
         z_min: f32_field(payload, "z_min")?,
         z_max: f32_field(payload, "z_max")?,
+        defaults: model::DisplayDefaults::default(),
     })
+}
+
+fn default_display(display: &DisplayProperties) -> model::DisplayDefaults {
+    model::DisplayDefaults {
+        name: display.name.clone(),
+        color: display.color.clone(),
+        brightness: display.brightness,
+        opacity: display.opacity,
+        z_min: display.z_min,
+        z_max: display.z_max,
+    }
 }
 
 fn bounds_from_payload(
