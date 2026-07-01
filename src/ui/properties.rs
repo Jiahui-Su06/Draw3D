@@ -145,17 +145,16 @@ fn edit_float_slider(
         let response = slider_field(
             ui,
             edit_value,
-            target,
             min,
             max,
             step,
             value_width - reset_button_width(ui),
         );
-        if response.number_changed {
-            *edit_value = *target;
-        } else if response.slider_changed {
+        let should_commit = response.number_changed || response.slider_committed;
+        if should_commit {
             *target = *edit_value;
-        } else if !response.slider_dragged {
+        }
+        if !response.slider_dragged && !response.number_has_focus && !response.slider_committed {
             *edit_value = *target;
         }
         if reset_button(ui, (*target - default_value).abs() > f32::EPSILON).clicked() {
@@ -315,15 +314,15 @@ fn readonly_field(ui: &mut egui::Ui, value: &str, width: f32) {
 }
 
 struct SliderFieldResponse {
-    slider_changed: bool,
+    slider_committed: bool,
     slider_dragged: bool,
     number_changed: bool,
+    number_has_focus: bool,
 }
 
 fn slider_field(
     ui: &mut egui::Ui,
     edit_value: &mut f32,
-    target: &mut f32,
     min: f32,
     max: f32,
     step: f64,
@@ -340,12 +339,16 @@ fn slider_field(
     );
     let number_response = ui.add_sized(
         [PROPERTY_NUMBER_WIDTH, row_height],
-        egui::DragValue::new(target).speed(step).range(min..=max),
+        egui::DragValue::new(edit_value)
+            .speed(step)
+            .range(min..=max),
     );
     SliderFieldResponse {
-        slider_changed: slider_response.changed(),
+        slider_committed: slider_response.drag_stopped()
+            || slider_response.clicked() && slider_response.changed(),
         slider_dragged: slider_response.dragged(),
         number_changed: number_response.changed(),
+        number_has_focus: number_response.has_focus(),
     }
 }
 

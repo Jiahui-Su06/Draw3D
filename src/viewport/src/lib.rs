@@ -788,15 +788,9 @@ fn object_mesh_key(obj: &ViewportObject) -> u64 {
     hash_f32(&mut hasher, obj.bounds.min_y);
     hash_f32(&mut hasher, obj.bounds.max_x);
     hash_f32(&mut hasher, obj.bounds.max_y);
-    hash_f32(&mut hasher, obj.z_min);
-    hash_f32(&mut hasher, obj.z_max);
-    obj.polygons.len().hash(&mut hasher);
-    for polygon in obj.polygons.iter() {
-        polygon.points.len().hash(&mut hasher);
-        for point in &polygon.points {
-            hash_f32(&mut hasher, point[0]);
-            hash_f32(&mut hasher, point[1]);
-        }
+    if !obj.polygons.is_empty() {
+        obj.polygons.len().hash(&mut hasher);
+        obj.polygons.as_ptr().hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -1296,5 +1290,34 @@ mod tests {
         assert!((viewport_camera.target.y - export_camera.target.y).abs() < 0.0001);
         assert!((viewport_camera.target.z - export_camera.target.z).abs() < 0.0001);
         assert!((viewport_camera.aspect - export_camera.aspect).abs() < 0.0001);
+    }
+
+    #[test]
+    fn key_ignores_z() {
+        let polygons: Arc<[Polygon2d]> = vec![Polygon2d {
+            points: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
+        }]
+        .into();
+        let mut object = ViewportObject {
+            id: "layer".to_owned(),
+            bounds: Bounds2d {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 10.0,
+                max_y: 10.0,
+            },
+            visible: true,
+            color: "#2D6CDF".to_owned(),
+            brightness: 1.0,
+            z_min: 0.0,
+            z_max: 10.0,
+            polygons,
+        };
+        let before = object_mesh_key(&object);
+
+        object.z_min = 20.0;
+        object.z_max = 40.0;
+
+        assert_eq!(object_mesh_key(&object), before);
     }
 }

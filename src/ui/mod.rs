@@ -323,7 +323,7 @@ impl Gds3dApp {
                 self.scene.touch();
             }
             if let Some(before) = before {
-                self.replace_object_after_edit(before);
+                self.replace_object_after_edit(before, false);
             }
         } else if row.row.clicked() {
             self.selection = Selection::Object(object_id.to_owned());
@@ -403,12 +403,26 @@ impl Gds3dApp {
     }
 
     fn show_object_properties(&mut self, ui: &mut egui::Ui, object_id: &str) {
-        let Some(before) = self.scene.get(object_id).cloned() else {
+        let edit_active = ui.input(|input| input.pointer.any_down());
+        let Some(current) = self.scene.get(object_id) else {
             ui.label(t!("property.no_component_selected").as_ref());
             return;
         };
 
-        self.property_edit.sync(object_id, &before);
+        self.property_edit.sync(object_id, current);
+        let should_capture_before = !edit_active
+            || self
+                .property_undo_before
+                .as_ref()
+                .is_none_or(|pending| pending.object_id() != object_id);
+        let (before_display, before_object) = match current {
+            SceneObject::GdsLayer(_) if should_capture_before => {
+                (Some(current.display().clone()), None)
+            }
+            SceneObject::Baseplate(_) if should_capture_before => (None, Some(current.clone())),
+            _ => (None, None),
+        };
+
         let Some(obj) = self.scene.get_mut(object_id) else {
             return;
         };
@@ -489,7 +503,12 @@ impl Gds3dApp {
             }
         }
 
-        self.replace_object_after_edit(before);
+        if let Some(before) = before_display {
+            self.replace_display_after_edit(object_id, before, edit_active);
+        }
+        if let Some(before) = before_object {
+            self.replace_object_after_edit(before, edit_active);
+        }
     }
 
     fn cell_bounds_summary(&self, key: &CellKey) -> CellBoundsSummary {

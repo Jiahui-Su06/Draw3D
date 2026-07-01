@@ -56,6 +56,7 @@ pub struct Gds3dApp {
     settings: AppSettings,
     archive_temp_dir: Option<PathBuf>,
     property_edit: PropertyEditState,
+    property_undo_before: Option<PropertyUndoBefore>,
     startup_theme_pending: bool,
     startup_window_nudge_pending: bool,
 }
@@ -87,7 +88,28 @@ enum UndoCommand {
     AddObjects(Vec<String>),
     DeleteObjects(Vec<SceneObject>),
     ReplaceObject(Box<SceneObject>),
+    ReplaceDisplay {
+        object_id: String,
+        display: DisplayProperties,
+    },
     SetGroupVisibility(Vec<(String, bool)>),
+}
+
+enum PropertyUndoBefore {
+    Object(Box<SceneObject>),
+    Display {
+        object_id: String,
+        display: DisplayProperties,
+    },
+}
+
+impl PropertyUndoBefore {
+    fn object_id(&self) -> &str {
+        match self {
+            Self::Object(object) => object.id(),
+            Self::Display { object_id, .. } => object_id,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -251,6 +273,7 @@ impl Gds3dApp {
             settings,
             archive_temp_dir: None,
             property_edit: PropertyEditState::default(),
+            property_undo_before: None,
             startup_theme_pending: true,
             startup_window_nudge_pending: true,
         }
@@ -600,6 +623,13 @@ impl Gds3dApp {
                     self.selection = Selection::Object(id);
                 }
             }
+            UndoCommand::ReplaceDisplay { object_id, display } => {
+                if let Some(current) = self.scene.get_mut(&object_id) {
+                    *current.display_mut() = display;
+                    self.scene.touch();
+                    self.selection = Selection::Object(object_id);
+                }
+            }
             UndoCommand::SetGroupVisibility(states) => {
                 for (object_id, visible) in states {
                     if let Some(obj) = self.scene.get_mut(&object_id) {
@@ -611,6 +641,8 @@ impl Gds3dApp {
         }
 
         self.status = t!("status.undid").to_string();
+        self.property_edit.object_id = None;
+        self.property_undo_before = None;
     }
 
     fn push_undo(&mut self, command: UndoCommand) {
@@ -660,11 +692,108 @@ impl Gds3dApp {
         save_app_settings(&self.settings);
     }
 
-    fn replace_object_after_edit(&mut self, before: SceneObject) {
-        let Some(after) = self.scene.get(before.id()) else {
+    fn take_property_undo_before(&mut self, object_id: &str) -> Option<PropertyUndoBefore> {
+        if self
+            .property_undo_before
+            .as_ref()
+            .is_some_and(|pending| pending.object_id() == object_id)
+        {
+            self.property_undo_before.take()
+        } else {
+            None
+        }
+    }
+
+    fn replace_display_after_edit(
+        &mut self,
+        object_id: &str,
+        before: DisplayProperties,
+        edit_active: bool,
+    ) {
+        let Some(after) = self.scene.get(object_id).map(SceneObject::display) else {
+            self.property_undo_before = None;
             return;
         };
-        if after != &before {
+
+        let changed_this_frame = after != &before;
+
+        if edit_active {
+            if changed_this_frame
+                && self
+                    .property_undo_before
+                    .as_ref()
+                    .is_none_or(|pending| pending.object_id() != object_id)
+            {
+                self.property_undo_before = Some(PropertyUndoBefore::Display {
+                    object_id: object_id.to_owned(),
+                    display: before,
+                });
+            }
+            return;
+        }
+
+        match self.take_property_undo_before(object_id) {
+            Some(PropertyUndoBefore::Display { object_id, display }) => {
+                let Some(after) = self.scene.get(object_id.as_str()).map(SceneObject::display)
+                else {
+                    return;
+                };
+                if after != &display {
+                    self.push_undo(UndoCommand::ReplaceDisplay { object_id, display });
+                    self.scene.touch();
+                }
+                return;
+            }
+            Some(pending) => self.property_undo_before = Some(pending),
+            None => {}
+        }
+
+        if changed_this_frame {
+            self.push_undo(UndoCommand::ReplaceDisplay {
+                object_id: object_id.to_owned(),
+                display: before,
+            });
+            self.scene.touch();
+        }
+    }
+
+    fn replace_object_after_edit(&mut self, before: SceneObject, edit_active: bool) {
+        let object_id = before.id().to_owned();
+        let Some(after) = self.scene.get(object_id.as_str()) else {
+            self.property_undo_before = None;
+            return;
+        };
+
+        let changed_this_frame = after != &before;
+
+        if edit_active {
+            if changed_this_frame
+                && self
+                    .property_undo_before
+                    .as_ref()
+                    .is_none_or(|pending| pending.object_id() != object_id)
+            {
+                self.property_undo_before = Some(PropertyUndoBefore::Object(Box::new(before)));
+            }
+            return;
+        }
+
+        match self.take_property_undo_before(object_id.as_str()) {
+            Some(PropertyUndoBefore::Object(pending)) => {
+                let Some(after) = self.scene.get(object_id.as_str()) else {
+                    return;
+                };
+                if after != pending.as_ref() {
+                    self.push_undo(UndoCommand::ReplaceObject(pending));
+                    self.scene.touch();
+                }
+                return;
+            }
+            Some(pending) => self.property_undo_before = Some(pending),
+            None => {}
+        }
+
+        if changed_this_frame {
             self.push_undo(UndoCommand::ReplaceObject(Box::new(before)));
             self.scene.touch();
         }
