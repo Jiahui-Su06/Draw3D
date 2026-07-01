@@ -24,6 +24,7 @@ gds3d-viewport = { path = "src/viewport" }
 flate2 = "1.1"
 indexmap = { version = "2", features = ["serde"] }
 lucide-icons = "1.22"
+printpdf = { version = "0.9", features = ["png"] }
 rfd = "0.17"
 rust-i18n = "4.1"
 serde = { version = "1", features = ["derive"] }

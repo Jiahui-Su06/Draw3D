@@ -382,11 +382,21 @@ impl Gds3dApp {
                 }
             }
         }
+        if format == ExportFormat::Pdf {
+            match self.start_view_pdf_export(path) {
+                Ok(()) => return true,
+                Err(err) => {
+                    self.status = t!("status.export_failed", error = err).to_string();
+                    return false;
+                }
+            }
+        }
 
         let result = match format {
             ExportFormat::Png => unreachable!("PNG export is handled above"),
             ExportFormat::Svg => unreachable!("SVG export is handled above"),
-            ExportFormat::Pdf | ExportFormat::Gltf => {
+            ExportFormat::Pdf => unreachable!("PDF export is handled above"),
+            ExportFormat::Gltf => {
                 export::write_scene_export(&path, &self.scene, self.export_settings)
             }
         };
@@ -475,6 +485,44 @@ impl Gds3dApp {
                 let svg = gds3d_viewport::embedded_png_svg(width, height, &title, &png)
                     .map_err(|err| anyhow::anyhow!(err))?;
                 fs::write(&path_for_worker, svg)?;
+                Ok(path_for_worker)
+            })();
+            let _ = sender.send(result);
+        });
+        self.export_task = Some(ExportTask { receiver });
+        self.status = t!("status.exporting", name = file_name(&path)).to_string();
+        Ok(())
+    }
+
+    fn start_view_pdf_export(&mut self, path: PathBuf) -> anyhow::Result<()> {
+        let Some(render_state) = self.render_state.as_ref() else {
+            anyhow::bail!("PDF export requires the WGPU renderer");
+        };
+        let Some((width, height)) = self.export_settings.image_size() else {
+            anyhow::bail!("PDF export requires an image size");
+        };
+        let render_state = render_state.clone();
+        let viewport_scene =
+            ui::viewport_scene(&self.scene, &self.selection, &mut self.viewport_scene_cache);
+        let viewport_scene = export_viewport_scene(viewport_scene);
+        let viewport = self.viewport.clone();
+        let scene = self.scene.clone();
+
+        let (sender, receiver) = mpsc::channel();
+        let path_for_worker = path.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<PathBuf> {
+                let rgba = gds3d_viewport::render_view_rgba_canvas(
+                    &render_state,
+                    &viewport_scene,
+                    &viewport,
+                    width,
+                    height,
+                )
+                .map_err(|err| anyhow::anyhow!(err))?;
+                let png = gds3d_viewport::encode_rgba_png(width, height, &rgba)
+                    .map_err(|err| anyhow::anyhow!(err))?;
+                export::write_pdf_report(&path_for_worker, &scene, &png, width, height)?;
                 Ok(path_for_worker)
             })();
             let _ = sender.send(result);

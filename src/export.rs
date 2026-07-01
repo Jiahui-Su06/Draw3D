@@ -2,6 +2,10 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::bail;
+use printpdf::{
+    BuiltinFont, Color, Line, LinePoint, Mm, Op, PaintMode, PdfDocument, PdfPage, PdfSaveOptions,
+    Point, Pt, RawImage, Rect, Rgb, TextItem, XObjectId, XObjectTransform, ops::PdfFontHandle,
+};
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +14,16 @@ use crate::model::{Bounds2d, Scene, SceneObject};
 const EXPORT_MARGIN_FACTOR: f32 = 0.04;
 const EXPORT_MARGIN_MIN_PX: f32 = 24.0;
 const IMAGE_PIXELS_MAX: u64 = 64_000_000;
-const PDF_POINTS_PER_PIXEL: f32 = 72.0 / 96.0;
+const PDF_PAGE_WIDTH_MM: f32 = 210.0;
+const PDF_PAGE_HEIGHT_MM: f32 = 297.0;
+const PDF_MARGIN_MM: f32 = 14.0;
+const PDF_IMAGE_DPI: f32 = 300.0;
+const PDF_TABLE_FONT_SIZE_PT: f32 = 7.0;
+const PDF_TABLE_HEADER_FONT_SIZE_PT: f32 = 7.0;
+const PDF_TABLE_ROW_HEIGHT_PT: f32 = 18.0;
+const PDF_TABLE_HEADER_HEIGHT_PT: f32 = 20.0;
+const PDF_CELL_PADDING_PT: f32 = 3.0;
+const MM_TO_PT: f32 = 72.0 / 25.4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportFormat {
@@ -155,9 +168,39 @@ pub fn write_scene_export(
     match settings.format {
         ExportFormat::Png => bail!("PNG export is handled by the viewport renderer"),
         ExportFormat::Svg => write_svg(path, width, height, &objects, &frame),
-        ExportFormat::Pdf => write_pdf(path, width, height, &objects, &frame),
+        ExportFormat::Pdf => bail!("PDF export is handled by the viewport renderer"),
         ExportFormat::Gltf => bail!("glTF export is not implemented"),
     }
+}
+
+pub fn write_pdf_report(
+    path: &Path,
+    scene: &Scene,
+    png: &[u8],
+    image_width: u32,
+    image_height: u32,
+) -> anyhow::Result<()> {
+    if image_width == 0 || image_height == 0 {
+        bail!("PDF image size must be non-zero");
+    }
+    if u64::from(image_width) * u64::from(image_height) > IMAGE_PIXELS_MAX {
+        bail!("PDF image is too large: {image_width} x {image_height}");
+    }
+
+    let rows = pdf_table_rows(scene);
+    let mut doc = PdfDocument::new("GDS3D Export");
+    let image = RawImage::decode_from_bytes(png, &mut Vec::new())
+        .map_err(|err| anyhow::anyhow!("decode PDF preview image: {err}"))?;
+    let image_id = doc.add_image(&image);
+    let pages = vec![
+        pdf_image_page(image_id, image_width, image_height),
+        pdf_table_page(&rows),
+    ];
+    let bytes = doc
+        .with_pages(pages)
+        .save(&PdfSaveOptions::default(), &mut Vec::new());
+    fs::write(path, bytes)?;
+    Ok(())
 }
 
 fn export_objects(scene: &Scene) -> anyhow::Result<Vec<ExportObject<'_>>> {
@@ -249,14 +292,6 @@ impl ExportFrame {
         (x, y)
     }
 
-    fn pdf_point(&self, point: [f32; 2]) -> (f32, f32) {
-        let x =
-            (self.x_offset + (point[0] - self.bounds.min_x) * self.scale) * PDF_POINTS_PER_PIXEL;
-        let y =
-            (self.y_offset + (point[1] - self.bounds.min_y) * self.scale) * PDF_POINTS_PER_PIXEL;
-        (x, y)
-    }
-
     fn rectangle_points(&self, bounds: &Bounds2d) -> [[f32; 2]; 4] {
         [
             [bounds.min_x, bounds.min_y],
@@ -321,125 +356,359 @@ fn push_svg_path(
     svg.push('\n');
 }
 
-fn write_pdf(
-    path: &Path,
-    width: u32,
-    height: u32,
-    objects: &[ExportObject<'_>],
-    frame: &ExportFrame,
-) -> anyhow::Result<()> {
-    let page_width = width as f32 * PDF_POINTS_PER_PIXEL;
-    let page_height = height as f32 * PDF_POINTS_PER_PIXEL;
-    let mut content = String::new();
-    content.push_str("q\n0.973 0.980 0.988 rg\n");
-    content.push_str(&format!(
-        "0 0 {:.3} {:.3} re f\nQ\n",
-        page_width, page_height
-    ));
-    for obj in objects {
-        if let Some(polygons) = obj.polygons {
-            for polygon in polygons {
-                push_pdf_path(&mut content, polygon.points.as_slice(), obj, frame);
-            }
-        } else {
-            push_pdf_path(
-                &mut content,
-                &frame.rectangle_points(obj.bounds),
-                obj,
-                frame,
+struct PdfTableRow {
+    cells: [String; 8],
+}
+
+fn pdf_table_rows(scene: &Scene) -> Vec<PdfTableRow> {
+    let mut rows = Vec::new();
+    for obj in scene.objects() {
+        if !obj.is_visible() {
+            continue;
+        }
+
+        let bounds = obj.bounds();
+        let display = obj.display();
+        match obj {
+            SceneObject::GdsLayer(layer) => rows.push(PdfTableRow {
+                cells: [
+                    display.name.clone(),
+                    "GDS".to_owned(),
+                    layer.cell_name.clone(),
+                    layer.layer.to_string(),
+                    layer.datatype.to_string(),
+                    range_text(bounds.min_x, bounds.max_x),
+                    range_text(bounds.min_y, bounds.max_y),
+                    range_text(display.z_min, display.z_max),
+                ],
+            }),
+            SceneObject::Baseplate(_) => rows.push(PdfTableRow {
+                cells: [
+                    display.name.clone(),
+                    "Baseplate".to_owned(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    range_text(bounds.min_x, bounds.max_x),
+                    range_text(bounds.min_y, bounds.max_y),
+                    range_text(display.z_min, display.z_max),
+                ],
+            }),
+        }
+    }
+    rows
+}
+
+fn pdf_image_page(image_id: XObjectId, image_width: u32, image_height: u32) -> PdfPage {
+    let page_width_pt = mm_to_pt(PDF_PAGE_WIDTH_MM);
+    let page_height_pt = mm_to_pt(PDF_PAGE_HEIGHT_MM);
+    let margin_pt = mm_to_pt(PDF_MARGIN_MM);
+    let content_width_pt = page_width_pt - margin_pt * 2.0;
+    let content_height_pt = page_height_pt - margin_pt * 2.0;
+    let image_limit_height_pt = (content_height_pt * 0.72).min(content_width_pt * 0.65);
+    let base_width_pt = px_to_pt(image_width, PDF_IMAGE_DPI);
+    let base_height_pt = px_to_pt(image_height, PDF_IMAGE_DPI);
+    let scale = (content_width_pt / base_width_pt).min(image_limit_height_pt / base_height_pt);
+    let drawn_width_pt = base_width_pt * scale;
+    let drawn_height_pt = base_height_pt * scale;
+    let x_pt = margin_pt + (content_width_pt - drawn_width_pt) * 0.5;
+    let y_pt = page_height_pt - margin_pt - drawn_height_pt;
+
+    let ops = vec![
+        Op::SetFillColor {
+            col: pdf_rgb(0xFF, 0xFF, 0xFF),
+        },
+        Op::DrawRectangle {
+            rectangle: Rect {
+                x: Pt(0.0),
+                y: Pt(0.0),
+                width: Pt(page_width_pt),
+                height: Pt(page_height_pt),
+                mode: Some(PaintMode::Fill),
+                winding_order: None,
+            },
+        },
+        Op::UseXobject {
+            id: image_id,
+            transform: XObjectTransform {
+                translate_x: Some(Pt(x_pt)),
+                translate_y: Some(Pt(y_pt)),
+                rotate: None,
+                scale_x: Some(scale),
+                scale_y: Some(scale),
+                dpi: Some(PDF_IMAGE_DPI),
+            },
+        },
+    ];
+    PdfPage::new(Mm(PDF_PAGE_WIDTH_MM), Mm(PDF_PAGE_HEIGHT_MM), ops)
+}
+
+fn pdf_table_page(rows: &[PdfTableRow]) -> PdfPage {
+    let page_width_pt = mm_to_pt(PDF_PAGE_WIDTH_MM);
+    let page_height_pt = mm_to_pt(PDF_PAGE_HEIGHT_MM);
+    let margin_pt = mm_to_pt(PDF_MARGIN_MM);
+    let table_width_pt = page_width_pt - margin_pt * 2.0;
+    let column_ratios = [0.16, 0.11, 0.15, 0.08, 0.09, 0.14, 0.14, 0.13];
+    let column_widths = column_widths(table_width_pt, column_ratios);
+    let max_rows = ((page_height_pt - margin_pt * 2.0 - PDF_TABLE_HEADER_HEIGHT_PT)
+        / PDF_TABLE_ROW_HEIGHT_PT)
+        .floor()
+        .max(0.0) as usize;
+    let row_count = rows.len().min(max_rows);
+    let table_height_pt = PDF_TABLE_HEADER_HEIGHT_PT + PDF_TABLE_ROW_HEIGHT_PT * row_count as f32;
+    let top_y_pt = page_height_pt - margin_pt;
+    let table_x_pt = margin_pt;
+    let table_y_pt = top_y_pt - table_height_pt;
+
+    let mut ops = Vec::new();
+    ops.push(Op::SetFillColor {
+        col: pdf_rgb(0xFF, 0xFF, 0xFF),
+    });
+    push_pdf_rect(
+        &mut ops,
+        table_x_pt,
+        table_y_pt,
+        table_width_pt,
+        table_height_pt,
+        PaintMode::Fill,
+    );
+    ops.push(Op::SetFillColor {
+        col: pdf_rgb(0xDF, 0xE6, 0xEE),
+    });
+    push_pdf_rect(
+        &mut ops,
+        table_x_pt,
+        top_y_pt - PDF_TABLE_HEADER_HEIGHT_PT,
+        table_width_pt,
+        PDF_TABLE_HEADER_HEIGHT_PT,
+        PaintMode::Fill,
+    );
+
+    for row_index in 0..row_count {
+        if row_index % 2 == 1 {
+            let y_pt = top_y_pt
+                - PDF_TABLE_HEADER_HEIGHT_PT
+                - PDF_TABLE_ROW_HEIGHT_PT * (row_index + 1) as f32;
+            ops.push(Op::SetFillColor {
+                col: pdf_rgb(0xF5, 0xF7, 0xFA),
+            });
+            push_pdf_rect(
+                &mut ops,
+                table_x_pt,
+                y_pt,
+                table_width_pt,
+                PDF_TABLE_ROW_HEIGHT_PT,
+                PaintMode::Fill,
             );
         }
     }
 
-    let mut pdf = PdfBuilder::new();
-    let catalog_id = pdf.add_object("<< /Type /Catalog /Pages 2 0 R >>".to_owned());
-    assert_eq!(catalog_id, 1);
-    pdf.add_object("<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned());
-    pdf.add_object(format!(
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {:.3} {:.3}] /Contents 4 0 R >>",
-        page_width, page_height
-    ));
-    pdf.add_stream(content.into_bytes());
-    fs::write(path, pdf.finish())?;
-    Ok(())
-}
+    ops.push(Op::SetOutlineColor {
+        col: pdf_rgb(0xAE, 0xB8, 0xC4),
+    });
+    ops.push(Op::SetOutlineThickness { pt: Pt(0.35) });
+    push_table_grid(
+        &mut ops,
+        table_x_pt,
+        table_y_pt,
+        top_y_pt,
+        &column_widths,
+        row_count,
+    );
 
-fn push_pdf_path(
-    content: &mut String,
-    points: &[[f32; 2]],
-    obj: &ExportObject<'_>,
-    frame: &ExportFrame,
-) {
-    if points.len() < 3 {
-        return;
-    }
-
-    let r = obj.color.r as f32 / 255.0;
-    let g = obj.color.g as f32 / 255.0;
-    let b = obj.color.b as f32 / 255.0;
-    content.push_str("q\n");
-    content.push_str(&format!("{:.3} {:.3} {:.3} rg\n", r, g, b));
-    for (index, point) in points.iter().enumerate() {
-        let (x, y) = frame.pdf_point(*point);
-        if index == 0 {
-            content.push_str(&format!("{:.3} {:.3} m\n", x, y));
-        } else {
-            content.push_str(&format!("{:.3} {:.3} l\n", x, y));
-        }
-    }
-    content.push_str("h f\nQ\n");
-}
-
-struct PdfBuilder {
-    objects: Vec<Vec<u8>>,
-}
-
-impl PdfBuilder {
-    fn new() -> Self {
-        Self {
-            objects: Vec::new(),
-        }
-    }
-
-    fn add_object(&mut self, body: String) -> usize {
-        self.objects.push(body.into_bytes());
-        self.objects.len()
-    }
-
-    fn add_stream(&mut self, data: Vec<u8>) -> usize {
-        let mut body = format!("<< /Length {} >>\nstream\n", data.len()).into_bytes();
-        body.extend_from_slice(&data);
-        body.extend_from_slice(b"\nendstream");
-        self.objects.push(body);
-        self.objects.len()
-    }
-
-    fn finish(self) -> Vec<u8> {
-        let mut out = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
-        let mut offsets = Vec::with_capacity(self.objects.len());
-        for (index, object) in self.objects.iter().enumerate() {
-            offsets.push(out.len());
-            out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
-            out.extend_from_slice(object);
-            out.extend_from_slice(b"\nendobj\n");
-        }
-
-        let xref_offset = out.len();
-        out.extend_from_slice(format!("xref\n0 {}\n", self.objects.len() + 1).as_bytes());
-        out.extend_from_slice(b"0000000000 65535 f \n");
-        for offset in offsets {
-            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-        }
-        out.extend_from_slice(
-            format!(
-                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
-                self.objects.len() + 1,
-                xref_offset
-            )
-            .as_bytes(),
+    let headers = [
+        "Name", "Kind", "Cell", "Layer", "Datatype", "X bounds", "Y bounds", "Z bounds",
+    ];
+    let mut cell_x_pt = table_x_pt;
+    for (column_index, header) in headers.iter().enumerate() {
+        push_pdf_text(
+            &mut ops,
+            header,
+            cell_x_pt + PDF_CELL_PADDING_PT,
+            top_y_pt - 12.0,
+            PDF_TABLE_HEADER_FONT_SIZE_PT,
+            true,
+            column_widths[column_index] - PDF_CELL_PADDING_PT * 2.0,
         );
-        out
+        cell_x_pt += column_widths[column_index];
     }
+
+    for (row_index, row) in rows.iter().take(row_count).enumerate() {
+        let text_y_pt = top_y_pt
+            - PDF_TABLE_HEADER_HEIGHT_PT
+            - PDF_TABLE_ROW_HEIGHT_PT * row_index as f32
+            - 11.5;
+        let mut cell_x_pt = table_x_pt;
+        for (column_index, cell) in row.cells.iter().enumerate() {
+            push_pdf_text(
+                &mut ops,
+                cell,
+                cell_x_pt + PDF_CELL_PADDING_PT,
+                text_y_pt,
+                PDF_TABLE_FONT_SIZE_PT,
+                false,
+                column_widths[column_index] - PDF_CELL_PADDING_PT * 2.0,
+            );
+            cell_x_pt += column_widths[column_index];
+        }
+    }
+
+    PdfPage::new(Mm(PDF_PAGE_WIDTH_MM), Mm(PDF_PAGE_HEIGHT_MM), ops)
+}
+
+fn push_table_grid(
+    ops: &mut Vec<Op>,
+    table_x_pt: f32,
+    table_y_pt: f32,
+    top_y_pt: f32,
+    column_widths: &[f32; 8],
+    row_count: usize,
+) {
+    let table_width_pt = column_widths.iter().sum::<f32>();
+    let mut x_pt = table_x_pt;
+    push_pdf_line(ops, x_pt, table_y_pt, x_pt, top_y_pt);
+    for width_pt in column_widths {
+        x_pt += width_pt;
+        push_pdf_line(ops, x_pt, table_y_pt, x_pt, top_y_pt);
+    }
+
+    push_pdf_line(
+        ops,
+        table_x_pt,
+        top_y_pt,
+        table_x_pt + table_width_pt,
+        top_y_pt,
+    );
+    let mut y_pt = top_y_pt - PDF_TABLE_HEADER_HEIGHT_PT;
+    push_pdf_line(ops, table_x_pt, y_pt, table_x_pt + table_width_pt, y_pt);
+    for _ in 0..row_count {
+        y_pt -= PDF_TABLE_ROW_HEIGHT_PT;
+        push_pdf_line(ops, table_x_pt, y_pt, table_x_pt + table_width_pt, y_pt);
+    }
+}
+
+fn push_pdf_text(
+    ops: &mut Vec<Op>,
+    text: &str,
+    x_pt: f32,
+    y_pt: f32,
+    size_pt: f32,
+    bold: bool,
+    max_width_pt: f32,
+) {
+    let text = truncate_pdf_text(text, size_pt, max_width_pt);
+    let font = if bold {
+        BuiltinFont::HelveticaBold
+    } else {
+        BuiltinFont::Helvetica
+    };
+    ops.push(Op::SetFillColor {
+        col: pdf_rgb(0x1F, 0x23, 0x28),
+    });
+    ops.push(Op::SetFont {
+        font: PdfFontHandle::Builtin(font),
+        size: Pt(size_pt),
+    });
+    ops.push(Op::StartTextSection);
+    ops.push(Op::SetTextCursor {
+        pos: Point {
+            x: Pt(x_pt),
+            y: Pt(y_pt),
+        },
+    });
+    ops.push(Op::ShowText {
+        items: vec![TextItem::Text(text)],
+    });
+    ops.push(Op::EndTextSection);
+}
+
+fn push_pdf_line(ops: &mut Vec<Op>, x1_pt: f32, y1_pt: f32, x2_pt: f32, y2_pt: f32) {
+    ops.push(Op::DrawLine {
+        line: Line {
+            points: vec![
+                LinePoint {
+                    p: Point {
+                        x: Pt(x1_pt),
+                        y: Pt(y1_pt),
+                    },
+                    bezier: false,
+                },
+                LinePoint {
+                    p: Point {
+                        x: Pt(x2_pt),
+                        y: Pt(y2_pt),
+                    },
+                    bezier: false,
+                },
+            ],
+            is_closed: false,
+        },
+    });
+}
+
+fn push_pdf_rect(
+    ops: &mut Vec<Op>,
+    x_pt: f32,
+    y_pt: f32,
+    width_pt: f32,
+    height_pt: f32,
+    mode: PaintMode,
+) {
+    ops.push(Op::DrawRectangle {
+        rectangle: Rect {
+            x: Pt(x_pt),
+            y: Pt(y_pt),
+            width: Pt(width_pt),
+            height: Pt(height_pt),
+            mode: Some(mode),
+            winding_order: None,
+        },
+    });
+}
+
+fn column_widths(total_width_pt: f32, ratios: [f32; 8]) -> [f32; 8] {
+    let mut widths = [0.0; 8];
+    for (index, ratio) in ratios.iter().enumerate() {
+        widths[index] = total_width_pt * ratio;
+    }
+    widths
+}
+
+fn truncate_pdf_text(text: &str, size_pt: f32, max_width_pt: f32) -> String {
+    let char_width_pt = size_pt * 0.52;
+    let max_chars = (max_width_pt / char_width_pt).floor().max(1.0) as usize;
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_owned();
+    }
+    if max_chars <= 1 {
+        return ".".to_owned();
+    }
+
+    let mut out = text.chars().take(max_chars - 1).collect::<String>();
+    out.push('.');
+    out
+}
+
+fn pdf_rgb(r: u8, g: u8, b: u8) -> Color {
+    Color::Rgb(Rgb::new(
+        r as f32 / 255.0,
+        g as f32 / 255.0,
+        b as f32 / 255.0,
+        None,
+    ))
+}
+
+fn range_text(min_value: f32, max_value: f32) -> String {
+    format!("{min_value:.2}, {max_value:.2}")
+}
+
+fn mm_to_pt(value_mm: f32) -> f32 {
+    value_mm * MM_TO_PT
+}
+
+fn px_to_pt(value_px: u32, dpi: f32) -> f32 {
+    value_px as f32 * 72.0 / dpi
 }
 
 fn include_bounds(target: &mut Option<Bounds2d>, bounds: &Bounds2d) {
@@ -492,7 +761,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::export::{
-        ExportFormat, ExportQuality, ExportSettings, ExportSizePreset, write_scene_export,
+        ExportFormat, ExportQuality, ExportSettings, ExportSizePreset, write_pdf_report,
+        write_scene_export,
     };
     use crate::model::{
         Bounds2d, DisplayProperties, GdsLayerObject, Polygon2d, Scene, SceneObject, new_baseplate,
@@ -500,32 +770,48 @@ mod tests {
     };
 
     #[test]
-    fn writes_svg_and_pdf_exports() {
+    fn writes_svg_export() {
         let temp_dir = std::env::temp_dir().join(format!("gds3d-export-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&temp_dir).expect("create temp dir");
         let scene = test_scene();
 
-        for format in [ExportFormat::Svg, ExportFormat::Pdf] {
-            let path = temp_dir.join(format!("scene.{}", format.extension()));
-            write_scene_export(
-                &path,
-                &scene,
-                ExportSettings {
-                    format,
-                    quality: ExportQuality::Low,
-                    size_preset: ExportSizePreset::Square1x1,
-                },
-            )
-            .expect("write scene export");
-            let data = fs::read(&path).expect("read export");
-            assert!(!data.is_empty());
-            match format {
-                ExportFormat::Svg => assert!(data.starts_with(b"<?xml")),
-                ExportFormat::Pdf => assert!(data.starts_with(b"%PDF-1.4")),
-                ExportFormat::Png => unreachable!(),
-                ExportFormat::Gltf => unreachable!(),
-            }
-        }
+        let path = temp_dir.join("scene.svg");
+        write_scene_export(
+            &path,
+            &scene,
+            ExportSettings {
+                format: ExportFormat::Svg,
+                quality: ExportQuality::Low,
+                size_preset: ExportSizePreset::Square1x1,
+            },
+        )
+        .expect("write svg export");
+        let data = fs::read(&path).expect("read svg export");
+        assert!(data.starts_with(b"<?xml"));
+
+        fs::remove_dir_all(&temp_dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn writes_two_page_pdf_report() {
+        let temp_dir = std::env::temp_dir().join(format!("gds3d-export-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let scene = test_scene();
+        let png = gds3d_viewport::encode_rgba_png(1, 1, &[255, 255, 255, 255]).expect("encode png");
+
+        let path = temp_dir.join("scene.pdf");
+        write_pdf_report(&path, &scene, &png, 1, 1).expect("write pdf report");
+        let data = fs::read(&path).expect("read pdf export");
+        assert!(data.starts_with(b"%PDF"));
+
+        let mut warnings = Vec::new();
+        let doc = printpdf::PdfDocument::parse(
+            &data,
+            &printpdf::PdfParseOptions::default(),
+            &mut warnings,
+        )
+        .expect("parse pdf export");
+        assert_eq!(doc.pages.len(), 2);
 
         fs::remove_dir_all(&temp_dir).expect("remove temp dir");
     }

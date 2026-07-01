@@ -331,9 +331,9 @@ fn render_view_rgba(
                 depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 248.0 / 255.0,
-                        g: 250.0 / 255.0,
-                        b: 252.0 / 255.0,
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
                         a: 1.0,
                     }),
                     store: wgpu::StoreOp::Discard,
@@ -714,53 +714,36 @@ impl WgpuViewport {
             self.index_count = upload_viewport_mesh(
                 device,
                 queue,
-                &mesh,
-                &mut self.vertex_buffer,
-                &mut self.vertex_capacity_bytes,
-                &mut self.index_buffer,
-                &mut self.index_capacity_bytes,
-                "gds3d_viewport_vertex_buffer",
-                "gds3d_viewport_index_buffer",
+                bytemuck::cast_slice(&mesh.vertices),
+                bytemuck::cast_slice(&mesh.indices),
+                mesh.indices.len() as u32,
+                ViewportMeshBuffers {
+                    vertex_buffer: &mut self.vertex_buffer,
+                    vertex_capacity_bytes: &mut self.vertex_capacity_bytes,
+                    index_buffer: &mut self.index_buffer,
+                    index_capacity_bytes: &mut self.index_capacity_bytes,
+                    vertex_label: "gds3d_viewport_vertex_buffer",
+                    index_label: "gds3d_viewport_index_buffer",
+                },
             );
             self.mesh_revision = Some(request.scene_revision);
         }
 
         let overlay = request.overlay_mesh(screen_descriptor.pixels_per_point);
-        self.overlay_index_count = overlay.indices.len() as u32;
-        if overlay.vertices.is_empty() || overlay.indices.is_empty() {
-            return;
-        }
-
-        let vertex_size = std::mem::size_of_val(overlay.vertices.as_slice()) as u64;
-        if vertex_size > self.overlay_vertex_capacity_bytes {
-            self.overlay_vertex_capacity_bytes = next_buffer_size(vertex_size);
-            self.overlay_vertex_buffer = create_copy_buffer(
-                device,
-                "gds3d_viewport_overlay_vertex_buffer",
-                wgpu::BufferUsages::VERTEX,
-                self.overlay_vertex_capacity_bytes,
-            );
-        }
-        queue.write_buffer(
-            &self.overlay_vertex_buffer,
-            0,
+        self.overlay_index_count = upload_viewport_mesh(
+            device,
+            queue,
             bytemuck::cast_slice(&overlay.vertices),
-        );
-
-        let index_size = std::mem::size_of_val(overlay.indices.as_slice()) as u64;
-        if index_size > self.overlay_index_capacity_bytes {
-            self.overlay_index_capacity_bytes = next_buffer_size(index_size);
-            self.overlay_index_buffer = create_copy_buffer(
-                device,
-                "gds3d_viewport_overlay_index_buffer",
-                wgpu::BufferUsages::INDEX,
-                self.overlay_index_capacity_bytes,
-            );
-        }
-        queue.write_buffer(
-            &self.overlay_index_buffer,
-            0,
             bytemuck::cast_slice(&overlay.indices),
+            overlay.indices.len() as u32,
+            ViewportMeshBuffers {
+                vertex_buffer: &mut self.overlay_vertex_buffer,
+                vertex_capacity_bytes: &mut self.overlay_vertex_capacity_bytes,
+                index_buffer: &mut self.overlay_index_buffer,
+                index_capacity_bytes: &mut self.overlay_index_capacity_bytes,
+                vertex_label: "gds3d_viewport_overlay_vertex_buffer",
+                index_label: "gds3d_viewport_overlay_index_buffer",
+            },
         );
     }
 
@@ -836,46 +819,52 @@ fn create_viewport_pipeline(
     })
 }
 
+struct ViewportMeshBuffers<'a> {
+    vertex_buffer: &'a mut wgpu::Buffer,
+    vertex_capacity_bytes: &'a mut u64,
+    index_buffer: &'a mut wgpu::Buffer,
+    index_capacity_bytes: &'a mut u64,
+    vertex_label: &'static str,
+    index_label: &'static str,
+}
+
 fn upload_viewport_mesh(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    mesh: &ViewportMesh,
-    vertex_buffer: &mut wgpu::Buffer,
-    vertex_capacity_bytes: &mut u64,
-    index_buffer: &mut wgpu::Buffer,
-    index_capacity_bytes: &mut u64,
-    vertex_label: &'static str,
-    index_label: &'static str,
+    vertex_bytes: &[u8],
+    index_bytes: &[u8],
+    index_count: u32,
+    buffers: ViewportMeshBuffers<'_>,
 ) -> u32 {
-    if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+    if vertex_bytes.is_empty() || index_bytes.is_empty() {
         return 0;
     }
 
-    let vertex_size = std::mem::size_of_val(mesh.vertices.as_slice()) as u64;
-    if vertex_size > *vertex_capacity_bytes {
-        *vertex_capacity_bytes = next_buffer_size(vertex_size);
-        *vertex_buffer = create_copy_buffer(
+    let vertex_size = vertex_bytes.len() as u64;
+    if vertex_size > *buffers.vertex_capacity_bytes {
+        *buffers.vertex_capacity_bytes = next_buffer_size(vertex_size);
+        *buffers.vertex_buffer = create_copy_buffer(
             device,
-            vertex_label,
+            buffers.vertex_label,
             wgpu::BufferUsages::VERTEX,
-            *vertex_capacity_bytes,
+            *buffers.vertex_capacity_bytes,
         );
     }
-    queue.write_buffer(vertex_buffer, 0, bytemuck::cast_slice(&mesh.vertices));
+    queue.write_buffer(buffers.vertex_buffer, 0, vertex_bytes);
 
-    let index_size = std::mem::size_of_val(mesh.indices.as_slice()) as u64;
-    if index_size > *index_capacity_bytes {
-        *index_capacity_bytes = next_buffer_size(index_size);
-        *index_buffer = create_copy_buffer(
+    let index_size = index_bytes.len() as u64;
+    if index_size > *buffers.index_capacity_bytes {
+        *buffers.index_capacity_bytes = next_buffer_size(index_size);
+        *buffers.index_buffer = create_copy_buffer(
             device,
-            index_label,
+            buffers.index_label,
             wgpu::BufferUsages::INDEX,
-            *index_capacity_bytes,
+            *buffers.index_capacity_bytes,
         );
     }
-    queue.write_buffer(index_buffer, 0, bytemuck::cast_slice(&mesh.indices));
+    queue.write_buffer(buffers.index_buffer, 0, index_bytes);
 
-    mesh.indices.len() as u32
+    index_count
 }
 
 fn create_copy_buffer(
