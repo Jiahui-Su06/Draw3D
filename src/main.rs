@@ -13,7 +13,11 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("GDS3D")
-            .with_inner_size(INITIAL_WINDOW_SIZE),
+            .with_inner_size(INITIAL_WINDOW_SIZE)
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+                    .unwrap_or_default(),
+            ),
         renderer: eframe::Renderer::Wgpu,
         depth_buffer: 24,
         multisampling: gds3d_viewport::RECOMMENDED_MSAA_SAMPLES,

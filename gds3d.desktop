@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=GDS3D
+Comment=3D visualization editor for GDS layouts
+Exec=gds3d
+Icon=gds3d
+Terminal=false
+Categories=Graphics;Science;Engineering;
+StartupNotify=true

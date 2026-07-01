@@ -1,0 +1,175 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example v0.1.0"
+        required: true
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: gds3d
+
+jobs:
+  build:
+    name: Build and package (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            suffix: linux-amd64
+            platform: linux
+            arch: x64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            suffix: linux-arm64
+            platform: linux
+            arch: arm64
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            suffix: darwin-amd64
+            platform: macos
+            arch: x64
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            suffix: darwin-arm64
+            platform: macos
+            arch: arm64
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            suffix: windows-amd64
+            platform: windows
+            arch: x64
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            suffix: windows-arm64
+            platform: windows
+            arch: arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            rpm \
+            libegl1 \
+            libgl1 \
+            libglib2.0-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-render-util0 \
+            libxcb-xinerama0
+
+      - name: Install Linux packagers
+        if: matrix.platform == 'linux'
+        run: cargo install --locked cargo-deb cargo-generate-rpm
+
+      - name: Install macOS packager
+        if: matrix.platform == 'macos'
+        run: cargo install --locked cargo-bundle
+
+      - name: Install Inno Setup
+        if: matrix.platform == 'windows'
+        run: choco install innosetup -y --no-progress
+
+      - name: Validate release version
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          if [[ ! "${{ inputs.version }}" =~ ^v[0-9]+(\.[0-9]+)*([-.][A-Za-z0-9]+)*$ ]]; then
+            echo "Version must look like v0.1.0"
+            exit 1
+          fi
+
+      - name: Package Linux
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          cargo build --release --locked --target "${{ matrix.target }}"
+          cargo deb --target "${{ matrix.target }}" --no-build
+          cargo generate-rpm --target "${{ matrix.target }}"
+
+          mkdir -p dist/installers
+          deb_path="$(find target -type f -name '*.deb' | head -n 1)"
+          rpm_path="$(find target -type f -name '*.rpm' | head -n 1)"
+          cp "$deb_path" "dist/installers/GDS3D-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}-${{ matrix.suffix }}.deb"
+          cp "$rpm_path" "dist/installers/GDS3D-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}-${{ matrix.suffix }}.rpm"
+
+      - name: Package macOS
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          cargo bundle --release --target "${{ matrix.target }}"
+
+          mkdir -p dist/installers
+          app_path="$(find target -type d -name 'GDS3D.app' | head -n 1)"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" \
+            "dist/installers/GDS3D-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}-${{ matrix.suffix }}.app.zip"
+
+      - name: Package Windows
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          cargo build --release --locked --target "${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path target/release | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/$env:BIN_NAME.exe" "target/release/$env:BIN_NAME.exe" -Force
+          packaging/windows/package.ps1 `
+            -Version "${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}" `
+            -Arch "${{ matrix.arch }}"
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.target }}-packages
+          path: dist/installers/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v5
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          files: release-artifacts/*
