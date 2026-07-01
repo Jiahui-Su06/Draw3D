@@ -1,10 +1,17 @@
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
 use eframe::{egui_wgpu, wgpu};
+
+mod image;
+mod math;
+mod renderer;
+
+use math::Vec3;
+
+pub use image::{embedded_png_svg, encode_rgba_png};
 
 const CAMERA_PITCH_MIN: f32 = -1.48;
 const CAMERA_PITCH_MAX: f32 = 1.48;
@@ -17,13 +24,6 @@ const AXIS_GIZMO_LABEL_GAP_PX: f32 = 9.0;
 const SELECTION_LINE_WIDTH_PX: f32 = 2.0;
 const SELECTION_PAD_FACTOR: f32 = 0.0025;
 const BUFFER_SIZE_MIN: u64 = 1024;
-const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
-const PNG_COLOR_TYPE_RGBA: u8 = 6;
-const PNG_BIT_DEPTH_8: u8 = 8;
-const PNG_COMPRESSION_DEFLATE: u8 = 0;
-const PNG_FILTER_NONE: u8 = 0;
-const PNG_INTERLACE_NONE: u8 = 0;
-const RENDER_PIXELS_MAX: u64 = 64_000_000;
 const EDGE_KEY_SCALE: f32 = 1000.0;
 
 pub const RECOMMENDED_MSAA_SAMPLES: u16 = 4;
@@ -76,7 +76,7 @@ pub struct ViewportState {
     pub pitch: f32,
     pub view_size: Vec2,
     last_drag_pos: Option<Pos2>,
-    renderer: Arc<Mutex<Option<WgpuViewport>>>,
+    renderer: Arc<Mutex<Option<renderer::WgpuViewport>>>,
 }
 
 impl Default for ViewportState {
@@ -98,7 +98,8 @@ impl ViewportState {
     pub fn new(render_state: Option<&egui_wgpu::RenderState>) -> Self {
         let mut state = Self::default();
         if let Some(render_state) = render_state {
-            let renderer = WgpuViewport::new(&render_state.device, render_state.target_format);
+            let renderer =
+                renderer::WgpuViewport::new(&render_state.device, render_state.target_format);
             state.renderer = Arc::new(Mutex::new(Some(renderer)));
         }
         state
@@ -129,7 +130,7 @@ pub fn show_viewport(
     let request = RenderRequest::from_scene(scene, state, rect);
     let callback = egui_wgpu::Callback::new_paint_callback(
         rect,
-        ViewportCallback {
+        renderer::ViewportCallback {
             renderer: Arc::clone(&state.renderer),
             request,
         },
@@ -162,15 +163,16 @@ pub fn render_view_png(
     if width == 0 || height == 0 {
         return Err("export image size must be non-zero".to_owned());
     }
-    if u64::from(width) * u64::from(height) > RENDER_PIXELS_MAX {
+    if u64::from(width) * u64::from(height) > image::RENDER_PIXELS_MAX {
         return Err(format!("export image is too large: {width} x {height}"));
     }
 
-    let capture_size = capture_size_for_canvas(width, height, state.view_size);
+    let capture_size = image::capture_size_for_canvas(width, height, state.view_size);
     let capture_rgba =
-        render_view_rgba(render_state, scene, state, capture_size.0, capture_size.1)?;
-    let rgba = center_on_canvas(width, height, capture_size.0, capture_size.1, &capture_rgba)?;
-    encode_png(width, height, &rgba).map_err(|err| format!("encode png: {err}"))
+        renderer::render_view_rgba(render_state, scene, state, capture_size.0, capture_size.1)?;
+    let rgba =
+        image::center_on_canvas(width, height, capture_size.0, capture_size.1, &capture_rgba)?;
+    image::encode_png(width, height, &rgba).map_err(|err| format!("encode png: {err}"))
 }
 
 /// Render the current viewport into a target-size RGBA canvas without PNG encoding.
@@ -184,225 +186,14 @@ pub fn render_view_rgba_canvas(
     if width == 0 || height == 0 {
         return Err("export image size must be non-zero".to_owned());
     }
-    if u64::from(width) * u64::from(height) > RENDER_PIXELS_MAX {
+    if u64::from(width) * u64::from(height) > image::RENDER_PIXELS_MAX {
         return Err(format!("export image is too large: {width} x {height}"));
     }
 
-    let capture_size = capture_size_for_canvas(width, height, state.view_size);
+    let capture_size = image::capture_size_for_canvas(width, height, state.view_size);
     let capture_rgba =
-        render_view_rgba(render_state, scene, state, capture_size.0, capture_size.1)?;
-    center_on_canvas(width, height, capture_size.0, capture_size.1, &capture_rgba)
-}
-
-/// Encode RGBA8 pixels as PNG bytes.
-pub fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
-    encode_png(width, height, rgba)
-}
-
-/// Wrap PNG bytes in an SVG image element.
-pub fn embedded_png_svg(
-    width: u32,
-    height: u32,
-    title: &str,
-    png: &[u8],
-) -> Result<String, String> {
-    if width == 0 || height == 0 {
-        return Err("svg size must be non-zero".to_owned());
-    }
-    if u64::from(width) * u64::from(height) > RENDER_PIXELS_MAX {
-        return Err(format!("svg image is too large: {width} x {height}"));
-    }
-    if !png.starts_with(PNG_SIGNATURE) {
-        return Err("embedded svg image must be png data".to_owned());
-    }
-
-    let encoded = base64_encode(png);
-    let mut svg = String::new();
-    svg.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
-    svg.push('\n');
-    svg.push_str(&format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">"#
-    ));
-    svg.push('\n');
-    svg.push_str("  <title>");
-    push_xml_escaped(&mut svg, title);
-    svg.push_str("</title>\n");
-    svg.push_str(r##"  <rect width="100%" height="100%" fill="#FFFFFF"/>"##);
-    svg.push('\n');
-    svg.push_str(&format!(
-        r#"  <image x="0" y="0" width="{width}" height="{height}" href="data:image/png;base64,{encoded}" preserveAspectRatio="none"/>"#
-    ));
-    svg.push_str("\n</svg>\n");
-    Ok(svg)
-}
-
-fn render_view_rgba(
-    render_state: &egui_wgpu::RenderState,
-    scene: &ViewportScene,
-    state: &ViewportState,
-    width: u32,
-    height: u32,
-) -> Result<Vec<u8>, String> {
-    if width == 0 || height == 0 {
-        return Err("capture size must be non-zero".to_owned());
-    }
-
-    let device = &render_state.device;
-    let queue = &render_state.queue;
-    let target = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("gds3d_export_target"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: render_state.target_format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
-    let msaa = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("gds3d_export_msaa"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: RECOMMENDED_MSAA_SAMPLES as u32,
-        dimension: wgpu::TextureDimension::D2,
-        format: render_state.target_format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    let msaa_view = msaa.create_view(&wgpu::TextureViewDescriptor::default());
-    let depth = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("gds3d_export_depth"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: RECOMMENDED_MSAA_SAMPLES as u32,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Depth24Plus,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-
-    let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(width as f32, height as f32));
-    let request = RenderRequest::from_scene(scene, state, rect);
-    let screen_descriptor = egui_wgpu::ScreenDescriptor {
-        size_in_pixels: [width, height],
-        pixels_per_point: 1.0,
-    };
-    let mut renderer = WgpuViewport::new(device, render_state.target_format);
-    renderer.prepare(device, queue, &screen_descriptor, &request);
-
-    let bytes_per_pixel = 4_u32;
-    let row_bytes = width
-        .checked_mul(bytes_per_pixel)
-        .ok_or_else(|| "export image row is too large".to_owned())?;
-    let padded_row_bytes = align_to(row_bytes, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-    let buffer_size = u64::from(padded_row_bytes)
-        .checked_mul(u64::from(height))
-        .ok_or_else(|| "export image buffer is too large".to_owned())?;
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("gds3d_export_readback"),
-        size: buffer_size,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("gds3d_export_encoder"),
-    });
-    {
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("gds3d_export_render_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &msaa_view,
-                resolve_target: Some(&target_view),
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 1.0,
-                        g: 1.0,
-                        b: 1.0,
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Discard,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Discard,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        renderer.paint(&mut render_pass);
-    }
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: &target,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &readback,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded_row_bytes),
-                rows_per_image: Some(height),
-            },
-        },
-        wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit([encoder.finish()]);
-
-    let (sender, receiver) = mpsc::channel();
-    readback.map_async(wgpu::MapMode::Read, .., move |result| {
-        let _ = sender.send(result);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|err| format!("wait for export render: {err}"))?;
-    receiver
-        .recv()
-        .map_err(|err| format!("wait for export readback: {err}"))?
-        .map_err(|err| format!("map export readback: {err}"))?;
-
-    let texture_format = render_state.target_format;
-    let mapped = readback.get_mapped_range(..);
-    let rgba_size = usize::try_from(u64::from(row_bytes) * u64::from(height))
-        .map_err(|_| "export image is too large".to_owned())?;
-    let row_stride =
-        usize::try_from(padded_row_bytes).map_err(|_| "invalid export row stride".to_owned())?;
-    let row_len = usize::try_from(row_bytes).map_err(|_| "invalid export row size".to_owned())?;
-    let mut rgba = Vec::with_capacity(rgba_size);
-    for row in mapped.chunks(row_stride) {
-        push_texture_row_as_rgba(&mut rgba, &row[..row_len], texture_format)?;
-    }
-    drop(mapped);
-    readback.unmap();
-
-    Ok(rgba)
+        renderer::render_view_rgba(render_state, scene, state, capture_size.0, capture_size.1)?;
+    image::center_on_canvas(width, height, capture_size.0, capture_size.1, &capture_rgba)
 }
 
 fn handle_camera_input(ui: &egui::Ui, response: &egui::Response, state: &mut ViewportState) {
@@ -494,578 +285,6 @@ fn paint_axis_labels(
             color,
         );
     }
-}
-
-struct ViewportCallback {
-    renderer: Arc<Mutex<Option<WgpuViewport>>>,
-    request: RenderRequest,
-}
-
-impl egui_wgpu::CallbackTrait for ViewportCallback {
-    fn prepare(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        screen_descriptor: &egui_wgpu::ScreenDescriptor,
-        _egui_encoder: &mut wgpu::CommandEncoder,
-        _callback_resources: &mut egui_wgpu::CallbackResources,
-    ) -> Vec<wgpu::CommandBuffer> {
-        if let Ok(mut guard) = self.renderer.lock()
-            && let Some(renderer) = guard.as_mut()
-        {
-            renderer.prepare(device, queue, screen_descriptor, &self.request);
-        }
-        Vec::new()
-    }
-
-    fn paint(
-        &self,
-        info: egui::PaintCallbackInfo,
-        render_pass: &mut wgpu::RenderPass<'static>,
-        _callback_resources: &egui_wgpu::CallbackResources,
-    ) {
-        let viewport = info.viewport_in_pixels();
-        if viewport.width_px == 0 || viewport.height_px == 0 {
-            return;
-        }
-        if let Ok(guard) = self.renderer.lock()
-            && let Some(renderer) = guard.as_ref()
-        {
-            renderer.paint(render_pass);
-        }
-    }
-}
-
-struct WgpuViewport {
-    pipeline: wgpu::RenderPipeline,
-    overlay_pipeline: wgpu::RenderPipeline,
-    uniform_buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    overlay_vertex_buffer: wgpu::Buffer,
-    overlay_index_buffer: wgpu::Buffer,
-    vertex_capacity_bytes: u64,
-    index_capacity_bytes: u64,
-    overlay_vertex_capacity_bytes: u64,
-    overlay_index_capacity_bytes: u64,
-    index_count: u32,
-    overlay_index_count: u32,
-    mesh_revision: Option<u64>,
-    object_meshes: HashMap<String, CachedObjectMesh>,
-}
-
-impl WgpuViewport {
-    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("gds3d_viewport_shader"),
-            source: wgpu::ShaderSource::Wgsl(VIEWPORT_SHADER.into()),
-        });
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gds3d_viewport_uniform"),
-            size: std::mem::size_of::<ViewUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("gds3d_viewport_bind_group_layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("gds3d_viewport_bind_group"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("gds3d_viewport_pipeline_layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-        let pipeline = create_viewport_pipeline(
-            device,
-            &shader,
-            &pipeline_layout,
-            target_format,
-            "gds3d_viewport_pipeline",
-            true,
-        );
-        let overlay_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("gds3d_viewport_overlay_shader"),
-            source: wgpu::ShaderSource::Wgsl(OVERLAY_SHADER.into()),
-        });
-        let overlay_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("gds3d_viewport_overlay_pipeline_layout"),
-                bind_group_layouts: &[],
-                immediate_size: 0,
-            });
-        let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("gds3d_viewport_overlay_pipeline"),
-            layout: Some(&overlay_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &overlay_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[OverlayVertex::layout()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &overlay_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth24Plus,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: RECOMMENDED_MSAA_SAMPLES as u32,
-                ..Default::default()
-            },
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let vertex_buffer = create_copy_buffer(
-            device,
-            "gds3d_viewport_vertex_buffer",
-            wgpu::BufferUsages::VERTEX,
-            BUFFER_SIZE_MIN,
-        );
-        let index_buffer = create_copy_buffer(
-            device,
-            "gds3d_viewport_index_buffer",
-            wgpu::BufferUsages::INDEX,
-            BUFFER_SIZE_MIN,
-        );
-        let overlay_vertex_buffer = create_copy_buffer(
-            device,
-            "gds3d_viewport_overlay_vertex_buffer",
-            wgpu::BufferUsages::VERTEX,
-            BUFFER_SIZE_MIN,
-        );
-        let overlay_index_buffer = create_copy_buffer(
-            device,
-            "gds3d_viewport_overlay_index_buffer",
-            wgpu::BufferUsages::INDEX,
-            BUFFER_SIZE_MIN,
-        );
-
-        Self {
-            pipeline,
-            overlay_pipeline,
-            uniform_buffer,
-            bind_group,
-            vertex_buffer,
-            index_buffer,
-            overlay_vertex_buffer,
-            overlay_index_buffer,
-            vertex_capacity_bytes: BUFFER_SIZE_MIN,
-            index_capacity_bytes: BUFFER_SIZE_MIN,
-            overlay_vertex_capacity_bytes: BUFFER_SIZE_MIN,
-            overlay_index_capacity_bytes: BUFFER_SIZE_MIN,
-            index_count: 0,
-            overlay_index_count: 0,
-            mesh_revision: None,
-            object_meshes: HashMap::new(),
-        }
-    }
-
-    fn prepare(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        screen_descriptor: &egui_wgpu::ScreenDescriptor,
-        request: &RenderRequest,
-    ) {
-        let uniform = ViewUniform::from_request(request);
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
-
-        if self.mesh_revision != Some(request.scene_revision) {
-            let mesh = request.mesh(&mut self.object_meshes);
-            self.index_count = upload_viewport_mesh(
-                device,
-                queue,
-                bytemuck::cast_slice(&mesh.vertices),
-                bytemuck::cast_slice(&mesh.indices),
-                mesh.indices.len() as u32,
-                ViewportMeshBuffers {
-                    vertex_buffer: &mut self.vertex_buffer,
-                    vertex_capacity_bytes: &mut self.vertex_capacity_bytes,
-                    index_buffer: &mut self.index_buffer,
-                    index_capacity_bytes: &mut self.index_capacity_bytes,
-                    vertex_label: "gds3d_viewport_vertex_buffer",
-                    index_label: "gds3d_viewport_index_buffer",
-                },
-            );
-            self.mesh_revision = Some(request.scene_revision);
-        }
-
-        let overlay = request.overlay_mesh(screen_descriptor.pixels_per_point);
-        self.overlay_index_count = upload_viewport_mesh(
-            device,
-            queue,
-            bytemuck::cast_slice(&overlay.vertices),
-            bytemuck::cast_slice(&overlay.indices),
-            overlay.indices.len() as u32,
-            ViewportMeshBuffers {
-                vertex_buffer: &mut self.overlay_vertex_buffer,
-                vertex_capacity_bytes: &mut self.overlay_vertex_capacity_bytes,
-                index_buffer: &mut self.overlay_index_buffer,
-                index_capacity_bytes: &mut self.overlay_index_capacity_bytes,
-                vertex_label: "gds3d_viewport_overlay_vertex_buffer",
-                index_label: "gds3d_viewport_overlay_index_buffer",
-            },
-        );
-    }
-
-    fn paint(&self, render_pass: &mut wgpu::RenderPass<'_>) {
-        if self.index_count > 0 {
-            render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_bind_group(0, &self.bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            render_pass.draw_indexed(0..self.index_count, 0, 0..1);
-        }
-        if self.overlay_index_count > 0 {
-            render_pass.set_pipeline(&self.overlay_pipeline);
-            render_pass.set_vertex_buffer(0, self.overlay_vertex_buffer.slice(..));
-            render_pass.set_index_buffer(
-                self.overlay_index_buffer.slice(..),
-                wgpu::IndexFormat::Uint32,
-            );
-            render_pass.draw_indexed(0..self.overlay_index_count, 0, 0..1);
-        }
-    }
-}
-
-fn create_viewport_pipeline(
-    device: &wgpu::Device,
-    shader: &wgpu::ShaderModule,
-    layout: &wgpu::PipelineLayout,
-    target_format: wgpu::TextureFormat,
-    label: &'static str,
-    depth_write_enabled: bool,
-) -> wgpu::RenderPipeline {
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(label),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some("vs_main"),
-            buffers: &[ViewportVertex::layout()],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: target_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
-            polygon_mode: wgpu::PolygonMode::Fill,
-            unclipped_depth: false,
-            conservative: false,
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth24Plus,
-            depth_write_enabled: Some(depth_write_enabled),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState {
-            count: RECOMMENDED_MSAA_SAMPLES as u32,
-            ..Default::default()
-        },
-        multiview_mask: None,
-        cache: None,
-    })
-}
-
-struct ViewportMeshBuffers<'a> {
-    vertex_buffer: &'a mut wgpu::Buffer,
-    vertex_capacity_bytes: &'a mut u64,
-    index_buffer: &'a mut wgpu::Buffer,
-    index_capacity_bytes: &'a mut u64,
-    vertex_label: &'static str,
-    index_label: &'static str,
-}
-
-fn upload_viewport_mesh(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    vertex_bytes: &[u8],
-    index_bytes: &[u8],
-    index_count: u32,
-    buffers: ViewportMeshBuffers<'_>,
-) -> u32 {
-    if vertex_bytes.is_empty() || index_bytes.is_empty() {
-        return 0;
-    }
-
-    let vertex_size = vertex_bytes.len() as u64;
-    if vertex_size > *buffers.vertex_capacity_bytes {
-        *buffers.vertex_capacity_bytes = next_buffer_size(vertex_size);
-        *buffers.vertex_buffer = create_copy_buffer(
-            device,
-            buffers.vertex_label,
-            wgpu::BufferUsages::VERTEX,
-            *buffers.vertex_capacity_bytes,
-        );
-    }
-    queue.write_buffer(buffers.vertex_buffer, 0, vertex_bytes);
-
-    let index_size = index_bytes.len() as u64;
-    if index_size > *buffers.index_capacity_bytes {
-        *buffers.index_capacity_bytes = next_buffer_size(index_size);
-        *buffers.index_buffer = create_copy_buffer(
-            device,
-            buffers.index_label,
-            wgpu::BufferUsages::INDEX,
-            *buffers.index_capacity_bytes,
-        );
-    }
-    queue.write_buffer(buffers.index_buffer, 0, index_bytes);
-
-    index_count
-}
-
-fn create_copy_buffer(
-    device: &wgpu::Device,
-    label: &'static str,
-    usage: wgpu::BufferUsages,
-    size: u64,
-) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some(label),
-        size,
-        usage: usage | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
-}
-
-fn next_buffer_size(size: u64) -> u64 {
-    size.next_power_of_two().max(BUFFER_SIZE_MIN)
-}
-
-fn align_to(value: u32, alignment: u32) -> u32 {
-    debug_assert!(alignment.is_power_of_two());
-    let mask = alignment - 1;
-    (value + mask) & !mask
-}
-
-fn push_texture_row_as_rgba(
-    out: &mut Vec<u8>,
-    row: &[u8],
-    format: wgpu::TextureFormat,
-) -> Result<(), String> {
-    match format {
-        wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => {
-            out.extend_from_slice(row);
-            Ok(())
-        }
-        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => {
-            for pixel in row.chunks_exact(4) {
-                out.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
-            }
-            Ok(())
-        }
-        other => Err(format!("unsupported export texture format: {other:?}")),
-    }
-}
-
-fn capture_size_for_canvas(canvas_width: u32, canvas_height: u32, view_size: Vec2) -> (u32, u32) {
-    let viewport_width = view_size.x.max(1.0);
-    let viewport_height = view_size.y.max(1.0);
-    let viewport_ratio = viewport_width / viewport_height;
-    let canvas_ratio = canvas_width as f32 / canvas_height as f32;
-
-    if viewport_ratio >= canvas_ratio {
-        let capture_width = canvas_width;
-        let capture_height = ((capture_width as f32 / viewport_ratio).round() as u32).max(1);
-        (capture_width, capture_height)
-    } else {
-        let capture_height = canvas_height;
-        let capture_width = ((capture_height as f32 * viewport_ratio).round() as u32).max(1);
-        (capture_width, capture_height)
-    }
-}
-
-fn center_on_canvas(
-    canvas_width: u32,
-    canvas_height: u32,
-    image_width: u32,
-    image_height: u32,
-    image_rgba: &[u8],
-) -> Result<Vec<u8>, String> {
-    let canvas_width_usize =
-        usize::try_from(canvas_width).map_err(|_| "invalid canvas width".to_owned())?;
-    let canvas_height_usize =
-        usize::try_from(canvas_height).map_err(|_| "invalid canvas height".to_owned())?;
-    let image_width_usize =
-        usize::try_from(image_width).map_err(|_| "invalid image width".to_owned())?;
-    let image_height_usize =
-        usize::try_from(image_height).map_err(|_| "invalid image height".to_owned())?;
-    let image_stride = image_width_usize
-        .checked_mul(4)
-        .ok_or_else(|| "image row is too large".to_owned())?;
-    let image_size = image_stride
-        .checked_mul(image_height_usize)
-        .ok_or_else(|| "image is too large".to_owned())?;
-    if image_rgba.len() != image_size {
-        return Err("image buffer has invalid length".to_owned());
-    }
-
-    let canvas_stride = canvas_width_usize
-        .checked_mul(4)
-        .ok_or_else(|| "canvas row is too large".to_owned())?;
-    let canvas_size = canvas_stride
-        .checked_mul(canvas_height_usize)
-        .ok_or_else(|| "canvas is too large".to_owned())?;
-    let mut canvas = vec![255_u8; canvas_size];
-    let x_offset = (canvas_width_usize.saturating_sub(image_width_usize)) / 2;
-    let y_offset = (canvas_height_usize.saturating_sub(image_height_usize)) / 2;
-
-    for row in 0..image_height_usize {
-        let src_start = row * image_stride;
-        let src_end = src_start + image_stride;
-        let dst_start = (row + y_offset) * canvas_stride + x_offset * 4;
-        let dst_end = dst_start + image_stride;
-        if dst_end > canvas.len() {
-            return Err("image does not fit on export canvas".to_owned());
-        }
-        canvas[dst_start..dst_end].copy_from_slice(&image_rgba[src_start..src_end]);
-    }
-    Ok(canvas)
-}
-
-fn push_xml_escaped(out: &mut String, value: &str) {
-    for ch in value.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            _ => out.push(ch),
-        }
-    }
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-
-        out.push(TABLE[(b0 >> 2) as usize] as char);
-        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(TABLE[(b2 & 0x3f) as usize] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
-
-fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
-    let row_bytes = usize::try_from(width)
-        .map_err(|_| "invalid png width".to_owned())?
-        .checked_mul(4)
-        .ok_or_else(|| "png row is too large".to_owned())?;
-    let expected_len = row_bytes
-        .checked_mul(usize::try_from(height).map_err(|_| "invalid png height".to_owned())?)
-        .ok_or_else(|| "png image is too large".to_owned())?;
-    if rgba.len() != expected_len {
-        return Err("png pixel buffer has invalid length".to_owned());
-    }
-
-    let height_usize = usize::try_from(height).map_err(|_| "invalid png height".to_owned())?;
-    let mut raw = Vec::with_capacity(expected_len + height_usize);
-    for row in rgba.chunks_exact(row_bytes) {
-        raw.push(PNG_FILTER_NONE);
-        raw.extend_from_slice(row);
-    }
-
-    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
-    std::io::Write::write_all(&mut encoder, &raw).map_err(|err| err.to_string())?;
-    let compressed = encoder.finish().map_err(|err| err.to_string())?;
-
-    let mut png = Vec::new();
-    png.extend_from_slice(PNG_SIGNATURE);
-    let mut ihdr = Vec::with_capacity(13);
-    ihdr.extend_from_slice(&width.to_be_bytes());
-    ihdr.extend_from_slice(&height.to_be_bytes());
-    ihdr.push(PNG_BIT_DEPTH_8);
-    ihdr.push(PNG_COLOR_TYPE_RGBA);
-    ihdr.push(PNG_COMPRESSION_DEFLATE);
-    ihdr.push(PNG_FILTER_NONE);
-    ihdr.push(PNG_INTERLACE_NONE);
-    write_png_chunk(&mut png, b"IHDR", &ihdr)?;
-    write_png_chunk(&mut png, b"IDAT", &compressed)?;
-    write_png_chunk(&mut png, b"IEND", &[])?;
-    Ok(png)
-}
-
-fn write_png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) -> Result<(), String> {
-    out.extend_from_slice(
-        &u32::try_from(data.len())
-            .map_err(|_| "png chunk is too large".to_owned())?
-            .to_be_bytes(),
-    );
-    out.extend_from_slice(kind);
-    out.extend_from_slice(data);
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(kind);
-    hasher.update(data);
-    out.extend_from_slice(&hasher.finalize().to_be_bytes());
-    Ok(())
 }
 
 #[repr(C)]
@@ -1466,15 +685,22 @@ impl Projection {
     }
 
     fn project(&self, point: Vec3) -> Option<ProjectedPoint> {
-        let rel = point - self.center;
         let eye_rel = point - self.eye;
-        let depth = (eye_rel.dot(self.forward) - self.near) / (self.far - self.near);
-        if !depth.is_finite() {
+        let view_z = eye_rel.dot(self.forward);
+        if view_z <= self.near {
             return None;
         }
+        let depth = (view_z - self.near) / (self.far - self.near);
+        let focal_distance = (self.center - self.eye).dot(self.forward).max(self.near);
+        let perspective = focal_distance / view_z;
+        if !depth.is_finite() || !perspective.is_finite() {
+            return None;
+        }
+        let half_width = self.half_width.max(0.001);
+        let half_height = self.half_height.max(0.001);
         Some(ProjectedPoint {
-            x: rel.dot(self.right) / self.half_width.max(0.001),
-            y: rel.dot(self.up) / self.half_height.max(0.001),
+            x: eye_rel.dot(self.right) * perspective / half_width,
+            y: eye_rel.dot(self.up) * perspective / half_height,
         })
     }
 }
@@ -1559,67 +785,6 @@ fn object_color_key(obj: &ViewportObject) -> u64 {
 
 fn hash_f32(hasher: &mut DefaultHasher, value: f32) {
     value.to_bits().hash(hasher);
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Vec3 {
-    x: f32,
-    y: f32,
-    z: f32,
-}
-
-impl Vec3 {
-    fn new(x: f32, y: f32, z: f32) -> Self {
-        Self { x, y, z }
-    }
-
-    fn dot(self, rhs: Self) -> f32 {
-        self.x * rhs.x + self.y * rhs.y + self.z * rhs.z
-    }
-
-    fn length(self) -> f32 {
-        self.dot(self).sqrt()
-    }
-
-    fn normalized(self) -> Self {
-        let length = self.length();
-        if length <= f32::EPSILON {
-            return Self::new(1.0, 0.0, 0.0);
-        }
-        self * (1.0 / length)
-    }
-
-    fn to_array(self) -> [f32; 3] {
-        [self.x, self.y, self.z]
-    }
-
-    fn to_vec4(self, w: f32) -> [f32; 4] {
-        [self.x, self.y, self.z, w]
-    }
-}
-
-impl std::ops::Add for Vec3 {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        Self::new(self.x + rhs.x, self.y + rhs.y, self.z + rhs.z)
-    }
-}
-
-impl std::ops::Sub for Vec3 {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        Self::new(self.x - rhs.x, self.y - rhs.y, self.z - rhs.z)
-    }
-}
-
-impl std::ops::Mul<f32> for Vec3 {
-    type Output = Self;
-
-    fn mul(self, rhs: f32) -> Self::Output {
-        Self::new(self.x * rhs, self.y * rhs, self.z * rhs)
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -2014,91 +1179,12 @@ fn channel_to_float(value: f32) -> f32 {
     value.round().clamp(0.0, 255.0) / 255.0
 }
 
-const VIEWPORT_SHADER: &str = r#"
-struct ViewUniform {
-    eye: vec4<f32>,
-    center: vec4<f32>,
-    right: vec4<f32>,
-    up: vec4<f32>,
-    forward: vec4<f32>,
-    params: vec4<f32>,
-};
-
-@group(0) @binding(0)
-var<uniform> view: ViewUniform;
-
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) color: vec4<f32>,
-    @location(2) normal: vec3<f32>,
-};
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-};
-
-@vertex
-fn vs_main(input: VertexInput) -> VertexOutput {
-    let rel = input.position - view.center.xyz;
-    let eye_rel = input.position - view.eye.xyz;
-    let half_width = max(view.params.x, 0.001);
-    let half_height = max(view.params.y, 0.001);
-    let near = view.params.z;
-    let far = max(view.params.w, near + 1.0);
-    let depth = (dot(eye_rel, view.forward.xyz) - near) / (far - near);
-
-    let light = normalize(vec3<f32>(0.35, -0.45, 0.82));
-    let intensity = 0.58 + max(dot(normalize(input.normal), light), 0.0) * 0.42;
-
-    var out: VertexOutput;
-    out.position = vec4<f32>(
-        dot(rel, view.right.xyz) / half_width,
-        dot(rel, view.up.xyz) / half_height,
-        depth,
-        1.0,
-    );
-    out.color = vec4<f32>(input.color.rgb * intensity, input.color.a);
-    return out;
-}
-
-@fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    return input.color;
-}
-"#;
-
-const OVERLAY_SHADER: &str = r#"
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) color: vec4<f32>,
-};
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-};
-
-@vertex
-fn vs_main(input: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(input.position, 1.0);
-    out.color = input.color;
-    return out;
-}
-
-@fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    return input.color;
-}
-"#;
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn skips_side_wall_for_shared_polygon_edge() {
+    fn skips_shared_side_wall() {
         let polygons = [
             Polygon2d {
                 points: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
@@ -2114,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_side_wall_for_single_polygon_edge() {
+    fn keeps_single_side_wall() {
         let polygons = [Polygon2d {
             points: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
         }];
@@ -2122,5 +1208,48 @@ mod tests {
         let mesh = polygon_mesh(&polygons, 0.0, 1.0, opaque_color(10, 20, 30));
 
         assert_eq!(mesh.indices.len(), 36);
+    }
+
+    #[test]
+    fn perspective_shrinks_far_points() {
+        let projection = Projection {
+            center: Vec3::new(0.0, 0.0, 10.0),
+            eye: Vec3::new(0.0, 0.0, 0.0),
+            right: Vec3::new(1.0, 0.0, 0.0),
+            up: Vec3::new(0.0, 1.0, 0.0),
+            forward: Vec3::new(0.0, 0.0, 1.0),
+            half_width: 5.0,
+            half_height: 5.0,
+            near: 0.1,
+            far: 100.0,
+        };
+
+        let near = projection
+            .project(Vec3::new(1.0, 0.0, 10.0))
+            .expect("project near point");
+        let far = projection
+            .project(Vec3::new(1.0, 0.0, 20.0))
+            .expect("project far point");
+
+        assert!(near.x > far.x);
+        assert!((near.x - 0.2).abs() < 0.0001);
+        assert!((far.x - 0.1).abs() < 0.0001);
+    }
+
+    #[test]
+    fn perspective_rejects_near_plane() {
+        let projection = Projection {
+            center: Vec3::new(0.0, 0.0, 10.0),
+            eye: Vec3::new(0.0, 0.0, 0.0),
+            right: Vec3::new(1.0, 0.0, 0.0),
+            up: Vec3::new(0.0, 1.0, 0.0),
+            forward: Vec3::new(0.0, 0.0, 1.0),
+            half_width: 5.0,
+            half_height: 5.0,
+            near: 0.1,
+            far: 100.0,
+        };
+
+        assert!(projection.project(Vec3::new(0.0, 0.0, 0.05)).is_none());
     }
 }

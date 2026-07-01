@@ -793,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_two_page_pdf_report() {
+    fn writes_pdf_pages() {
         let temp_dir = std::env::temp_dir().join(format!("gds3d-export-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&temp_dir).expect("create temp dir");
         let scene = test_scene();

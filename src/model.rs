@@ -1068,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn uses_stable_english_baseplate_names() {
+    fn stable_baseplate_names() {
         let mut scene = Scene::default();
         assert_eq!(scene.next_baseplate_name(), "Baseplate 1");
 
@@ -1089,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_baseplate_bounds_from_selected_cell() {
+    fn bounds_from_cell_selection() {
         let mut scene = Scene::default();
         let file_path = PathBuf::from("models/test.gds");
         scene
@@ -1134,7 +1134,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_baseplate_bounds_from_all_gds_layers_when_scene_selected() {
+    fn bounds_from_scene_selection() {
         let mut scene = Scene::default();
         scene
             .add(test_gds_layer(
@@ -1175,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_existing_baseplates_when_creating_default_bounds() {
+    fn bounds_ignore_baseplates() {
         let mut scene = Scene::default();
         scene
             .add(new_baseplate(
@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn inspects_top_level_gds_cells() {
+    fn inspects_top_cells() {
         let info = inspect_gds_file(Path::new("models/AWG_0.8nmCS_16CH_0nmOS.gds"))
             .expect("inspect sample GDS");
 
