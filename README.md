@@ -6,5 +6,15 @@ GDS3D imports GDS files, builds an interactive 3D scene, and exports figures or 
 
 <img src="assets/view.png" alt="GDS3D viewport" width="720">
 
+## Develop
+
+The project is written by [Rust](https://rust-lang.org).
+
+You need rustup and cargo, then run the project:
+
+```bash
+cargo run
+```
+
 ## License
 [MIT](LICENSE)
